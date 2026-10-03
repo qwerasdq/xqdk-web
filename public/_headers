@@ -1,0 +1,4 @@
+# Cloudflare Pages 自定义响应头（pikafish WASM pthread 构建需要 SharedArrayBuffer）
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp

@@ -1,14 +1,6 @@
-# AI 工具本地配置
-.claude/settings.local.json
-.cursor/
-.aider*
-.continue/
-.cody/
-
-# 密钥和凭证
-*.pem
-*.key
-credentials.json
+node_modules
+dist
+tsconfig.tsbuildinfo
+# 本机配置：npm 国内镜像不适用于 CI（美国 runner），本地权限配置因人而异
 .npmrc
-.aws/
-.ssh/
+.claude/settings.local.json
