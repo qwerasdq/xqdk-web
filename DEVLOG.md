@@ -181,3 +181,21 @@ Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v
 - Workers Builds 面板配置：Build `npm ci && npx vitest run && npm run build`，Deploy `npx wrangler deploy`
 - 发现：本机 DNS 对 pages.dev 域直查超时，用 DoH（dns.alidns.com）验证 xqdk-web.pages.dev 为 NXDOMAIN，
   排除网络因素确认项目不在 Pages；worker 地址为 xqdk-web.<子域>.workers.dev
+
+## 2026-10-03 — 第 2 天（收尾）：部署完成
+
+- **线上地址**：https://xqdk-web.2054488343.workers.dev/（Cloudflare Workers 静态资源，Workers Builds 自动构建部署）
+- 线上核验（海外节点 + 响应头服务，本机因 workers.dev 被阻断无法直连）：
+  - 站点 200 OK（德国×2 / 西班牙节点，~0.1s）
+  - COOP/COEP 响应头生效（引擎 SAB 前提）
+  - /engine/pikafish.wasm 200 + application/wasm；/engine/pikafish.data 200 + 4,134,154 字节（与本地一致）
+- **已知限制**：workers.dev 域名在国内被定向阻断（换真实 CF IP 直连仍超时；Cloudflare 主站可直连，排除部署问题）
+  - 决策：暂不绑自定义域名，先用代理访问
+  - 缓解：PWA Service Worker 缓存——代理加载一次后，SW 可离线供应应用壳+引擎文件，后续无代理访问理论可行
+  - 后续可选：绑定自定义域名（有域名时 10 分钟接入）
+
+### 线上最终验证（用户实测，代理访问）
+- ✅ 引擎在真实部署环境加载正常：状态栏「Pikafish 已就绪」，走子后 AI 正常应招
+- ✅ **PWA 离线缓存意外解决了国内访问难题**：开代理加载一次（全量文件进 SW 缓存）后，
+  关代理刷新页面依然可用——日常使用不再需要代理
+  （前提：首次需代理；清浏览器数据/换浏览器需重来；SW 更新检查在无代理时会静默失败，无碍使用）
