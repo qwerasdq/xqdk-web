@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "xqdk-web",
+  "compatibility_date": "2026-10-03",
+  // 纯静态资源 Worker：vite build 产物目录；_headers 随 public/ 一起进入 dist，
+  // Workers 静态资源会解析 dist/_headers 应用 COOP/COEP（引擎 SAB 必需）
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}

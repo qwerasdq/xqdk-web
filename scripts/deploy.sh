@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # 本地校验 + 手动部署（备用）
 #
-# 正式部署走 Cloudflare Git 集成：推送到 GitHub → Cloudflare 自动构建部署（无需 Token）。
+# 正式部署走 Cloudflare Workers Builds（Git 集成）：推送到 GitHub → Cloudflare 自动构建部署。
 # 本脚本用于：本地提交前的完整校验（--check），或 Git 集成出问题时的手动部署兜底。
 #
 # 为什么不是 GitHub Pages：Pikafish WASM 是 pthread 构建，需要 SharedArrayBuffer，
 # 而 SAB 要求 COOP/COEP 响应头，GitHub Pages 不支持自定义响应头。
-# Cloudflare Pages 通过 public/_headers 配置（构建时复制到 dist/_headers）。
+# Worker 静态资源通过 dist/_headers（源自 public/_headers）配置响应头。
 #
 # 用法：
 #   bash scripts/deploy.sh --check        # 仅本地校验（单测 + 构建 + 产物检查），不部署
@@ -15,14 +15,8 @@
 #
 # 手动部署首次使用：
 #   npx wrangler login                    # 浏览器授权（或用 CLOUDFLARE_API_TOKEN 环境变量）
-#
-# 可用环境变量：
-#   CF_PAGES_PROJECT   项目名（默认 xqdk-web）
-#   CF_PAGES_BRANCH    分支（默认 main；与项目 production branch 一致时为生产部署）
 set -euo pipefail
 
-PROJECT_NAME="${CF_PAGES_PROJECT:-xqdk-web}"
-BRANCH="${CF_PAGES_BRANCH:-main}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
@@ -82,20 +76,17 @@ if printf '%s' "$WHO" | grep -qi "not authenticated\|not logged in\|未登录"; 
   exit 1
 fi
 
-# ---- 5. 首次部署创建项目（已存在则忽略）----
-npx wrangler pages project create "$PROJECT_NAME" --production-branch "$BRANCH" >/dev/null 2>&1 || true
-
-# ---- 6. 部署 ----
-echo "==> 部署到 Cloudflare Pages（$PROJECT_NAME / $BRANCH）"
+# ---- 5. 部署（Worker 静态资源，配置见根目录 wrangler.jsonc）----
+echo "==> 部署到 Cloudflare Workers（xqdk-web）"
 set +e
-OUT="$(npx wrangler pages deploy dist --project-name "$PROJECT_NAME" --branch "$BRANCH" 2>&1)"
+OUT="$(npx wrangler deploy 2>&1)"
 STATUS=$?
 set -e
 printf '%s\n' "$OUT"
 [ "$STATUS" -eq 0 ] || { echo "[x] 部署失败（wrangler 退出码 $STATUS）"; exit "$STATUS"; }
 
-# ---- 7. 线上验证（COOP/COEP 是引擎能否加载的前提）----
-URL="$(printf '%s' "$OUT" | grep -oE 'https://[a-zA-Z0-9.-]+\.pages\.dev' | tail -1)"
+# ---- 6. 线上验证（COOP/COEP 是引擎能否加载的前提）----
+URL="$(printf '%s' "$OUT" | grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' | tail -1)"
 if [ -n "$URL" ]; then
   echo "==> 线上验证响应头（$URL）"
   H="$(curl -sI "$URL/" 2>/dev/null || true)"

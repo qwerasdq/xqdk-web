@@ -159,3 +159,25 @@ Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v
 - 一次性配置：Cloudflare 建 API Token（Pages:Edit）+ GitHub Secrets 配 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
 - .gitignore 更新：排除 dist/ 与 tsconfig.tsbuildinfo
 - 本地已验证：YAML 语法、npm ci（需先结束占用的 vite 进程，EPERM 解除）、引擎准备 shell 脚本、SHA 校验、测试与构建链
+
+## 2026-10-03 — 第 2 天（续）：部署方式改 Cloudflare Git 集成
+
+- 原 GitHub Actions + API Token 方案改为 **Cloudflare Pages Git 集成**（推送到 GitHub 即自动构建部署，无需 Token/Secret）：
+  - 移除 `.github/workflows/deploy.yml`
+  - 新增 `.nvmrc`（固定 Node 22，Cloudflare 构建镜像识别）
+  - `scripts/deploy.sh` 保留为本地校验（`--check`）+ 手动部署兜底，头注释已更新
+  - Cloudflare 面板构建配置：构建命令 `npm ci && npx vitest run && npm run build`，输出目录 `dist`，生产分支 `main`
+- 锁文件已验证含 Linux 平台二进制（@rollup/linux-x64、@esbuild/linux-x64），Windows 生成不影响云端构建
+- 仓库迁移：项目从 `qwerasdq/project`（main 为另一记账项目）迁至新仓库，本地历史随推（master → main）
+
+## 2026-10-03 — 第 2 天（续）：部署适配 Cloudflare Worker（替代 Pages）
+
+- 实际现状：Cloudflare 2026 已把 Pages 并入 Workers（Pages 维护模式），新建项目走 Worker 静态资源
+  → dashboard 创建的是 Worker `xqdk-web`（非 Pages），适配而非回退：
+  - 新增 `wrangler.jsonc`：`assets.directory = ./dist` + `not_found_handling: single-page-application`
+  - `_headers` 在 Worker 静态资源同样生效（官方文档确认：放静态资源目录即 dist/_headers）
+  - `scripts/deploy.sh` 手动部署改为 `npx wrangler deploy`，去掉 pages 专用参数与 CF_PAGES_* 环境变量
+- 验证：`wrangler deploy --dry-run` 配置校验通过（13 files in dist）；`--check` 全链路通过
+- Workers Builds 面板配置：Build `npm ci && npx vitest run && npm run build`，Deploy `npx wrangler deploy`
+- 发现：本机 DNS 对 pages.dev 域直查超时，用 DoH（dns.alidns.com）验证 xqdk-web.pages.dev 为 NXDOMAIN，
+  排除网络因素确认项目不在 Pages；worker 地址为 xqdk-web.<子域>.workers.dev
