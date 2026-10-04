@@ -38,14 +38,17 @@ Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v
   - `vite.config.ts` 给模型/ORT 配置 PWA runtime cache，且用 extern-wasm 条件避免重复拷贝
   - `.gitignore` 忽略 `public/ort/` 与调试样本 `public/samples/`
 
-### 验证
+### 验证（收尾 W6b）
 
 - 单元测试：67 个全部通过（规则 19 + XQF 5 + PGN 9 + vision 系列；新增 reconcile redGo 与 tracker lastMovedSide 覆盖）
 - 黑方视角翻转：JJ 支招切我方执黑后，`将` 从 y≈210 移到 y≈770、`帅` 从 y≈770 移到 y≈210，180° 翻转生效；渲染层翻转不影响内部坐标/点击/箭头（Playwright 实测）
-- 构建：`npm run build` 全绿
-- `npm run build`（vue-tsc + vite）全绿，产物含 `models/xq-yolo-640.onnx`、`ort-wasm-simd-threaded.jsep.wasm`、`pikafish.*`
-- `vite preview` 冒烟：主页与 `?visionLab=1` 无页面错误；断言 COOP/COEP 响应头、模型 / ORT / 引擎资产均 200 可访问
-- 截图：`w6_main.png`、`w6_visionLab.png`（工作区未提交入口图）
+- 构建：`npm run build` 全绿，产物含 `models/xq-yolo-640.onnx`、`ort-wasm-simd-threaded.jsep.wasm`、`pikafish.*`
+- `vite preview` 冒烟：主页与 `?visionLab=1` 无页面错误；COOP/COEP 响应头与模型 / ORT / 引擎资产均 200 可访问
+- 真实浏览器（Python Playwright + Chrome）VisionLab 推理：模型 `ready (wasm)`，静态样本首次检出 33 个检测框并映射成 `NEW_BOARD`、32 棋子、avg 0.932、STANDARD，随后持续 SAME_BOARD，无页面/控制台错误
+- 部署校验：`bash scripts/deploy.sh --check --skip-tests` 全部通过；ORT wasm 20.9MiB，低于 Cloudflare 单文件 25MiB 上限
+- 已清理 `.tmp-vision/`（临时 e2e 脚本 + 模型来源 zip）
+- 提交：`e7cee72` W6b：屏幕识别真实推理链路 + 自动同步 Game（26 文件，1482 增 / 7 删）
+- 截图：`w6_sync_e2e.png`、`w6_visionlab_e2e.png` 已纳入提交
 
 ### 遗留 / 待办
 - [ ] W6c：真实 JJ 窗口屏幕捕获验证（模型识别/自动同步需要真实窗口人工确认；`?visionLab=1` 用静态样本/样本推理）
