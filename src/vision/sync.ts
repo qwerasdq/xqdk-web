@@ -16,9 +16,16 @@ import { toFen } from './assistBoard'
 import type { MappedBoard } from './types'
 import { BOARD_H, BOARD_W, CELLS } from './types'
 
+export interface SyncPlan {
+  kind: 'noop' | 'move' | 'reload'
+  path?: SearchStep[]
+  fen?: string
+  reason?: string
+}
+
 export interface Reconciled {
   /** 应用方式：move = 用合法着法走（历史保留）；reload = 直接换棋盘；noop = 没变化 */
-  applied: 'move' | 'reload' | 'noop'
+  applied: SyncPlan['kind']
   fen?: string
   move?: { from: Position; to: Position }
   reason?: string
@@ -90,7 +97,7 @@ function boardAsBoard(board: Uint8Array, redGo: boolean): Board {
  * 从 current 到 target 的合法走法路径（深度 ≤maxPlies，按行棋方交替）。
  * 返回 null 表示没有匹配路径。
  */
-function findPath(g: SyncGame, target: Uint8Array, maxPlies = 2): SearchStep[] | null {
+export function findSyncPath(g: SyncGame, target: Uint8Array, maxPlies = 2): SearchStep[] | null {
   const start = flattenBoard(g)
   if (equalBoards(start, target)) return []
 
@@ -112,29 +119,41 @@ function findPath(g: SyncGame, target: Uint8Array, maxPlies = 2): SearchStep[] |
 }
 
 /**
+ * 计算调和计划：move = 找到合法走法路径（未实际执行）；reload = 需要直接换盘；noop = 没变化。
+ */
+export function planSync(g: SyncGame, mapped: MappedBoard, redGo: boolean): SyncPlan {
+  const canonical = mapped.canonical
+  if (canonical.length !== CELLS) return { kind: 'noop', reason: '识别结果长度异常' }
+
+  const current = flattenBoard(g)
+  if (equalBoards(current, canonical)) return { kind: 'noop' }
+
+  const path = findSyncPath(g, canonical, 2)
+  if (path) return { kind: 'move', path }
+
+  const fen = toFen(canonical, redGo)
+  if (!fen) return { kind: 'noop', reason: 'FEN 生成失败' }
+  return { kind: 'reload', fen, reason: '无法用合法走法到达' }
+}
+
+/**
  * 调和：返回应用方式。move 路径已实际执行到 Game；reload 已通过 restoreFromFEN 重载。
  */
 export function reconcileGame(g: SyncGame, mapped: MappedBoard, redGo: boolean): Reconciled {
-  const canonical = mapped.canonical
-  if (canonical.length !== CELLS) return { applied: 'noop', reason: '识别结果长度异常' }
+  const plan = planSync(g, mapped, redGo)
+  if (plan.kind === 'noop') return { applied: 'noop', reason: plan.reason }
 
-  const current = flattenBoard(g)
-  if (equalBoards(current, canonical)) return { applied: 'noop' }
-
-  const path = findPath(g, canonical, 2)
-  if (path) {
-    for (const m of path) {
+  if (plan.kind === 'move') {
+    for (const m of plan.path ?? []) {
       const st = g.movePiece(m.from, m.to)
       if (st.status === GameStatus.ILLEGAL) {
-        return { applied: 'reload', fen: toFen(canonical, redGo), reason: '路径含非法着法' }
+        return { applied: 'reload', fen: plan.fen, reason: '路径含非法着法' }
       }
     }
-    return { applied: 'move', move: path[path.length - 1] }
+    const last = plan.path?.[plan.path.length - 1]
+    return { applied: 'move', move: last ? { from: last.from, to: last.to } : undefined }
   }
 
-  const fen = toFen(canonical, redGo)
-  if (!g.restoreFromFEN(fen)) {
-    return { applied: 'noop', reason: 'FEN 重载失败' }
-  }
-  return { applied: 'reload', fen }
+  if (plan.fen && g.restoreFromFEN(plan.fen)) return { applied: 'reload', fen: plan.fen }
+  return { applied: 'noop', reason: plan.reason || 'FEN 重载失败' }
 }

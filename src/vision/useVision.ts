@@ -7,7 +7,11 @@ import { reactive } from 'vue'
 import { ScreenCapture } from './capture'
 import type { FromVisionWorker, MappedBoard, ToVisionWorker, TrackerEvent } from './types'
 
-export type VisionState = 'idle' | 'loading' | 'capturing' | 'error'
+export type VisionState = 'idle' | 'loading' | 'capturing' | 'error' | 'awaiting-confirm'
+export interface VisionSourceInfo {
+  label: string
+  displaySurface: 'monitor' | 'window' | 'browser' | 'unknown'
+}
 export type Backend = 'webgpu' | 'wasm'
 
 export interface VisionHandlers {
@@ -26,6 +30,7 @@ export interface VisionStateObject {
   lastError: string
   unstableStreak: number
   started: boolean
+  sourceInfo: VisionSourceInfo | null
 }
 
 export interface VisionController {
@@ -33,6 +38,7 @@ export interface VisionController {
   start: (ep: 'auto' | Backend) => Promise<void>
   stop: () => void
   resetTracker: () => void
+  ackDecision: (decision: 'apply' | 'discard', canonical: Uint8Array) => void
 }
 
 export function useVision(modelUrl: string, ortDir: string, handlers: VisionHandlers = {}): VisionController {
@@ -42,6 +48,7 @@ export function useVision(modelUrl: string, ortDir: string, handlers: VisionHand
     lastError: '',
     unstableStreak: 0,
     started: false,
+    sourceInfo: null as VisionSourceInfo | null,
   })
 
   let worker: Worker | null = null
@@ -127,12 +134,19 @@ export function useVision(modelUrl: string, ortDir: string, handlers: VisionHand
           terminateWorker()
           state.state = 'idle'
           state.backend = null
+          state.sourceInfo = null
           state.started = false
           state.unstableStreak = 0
         },
         onError: (message) => notifyError(message),
       })
       await capture.start()
+      state.sourceInfo = capture.sourceInfo
+        ? {
+            label: capture.sourceInfo.label,
+            displaySurface: (capture.sourceInfo.displaySurface as 'monitor' | 'window' | 'browser' | 'unknown') || 'unknown',
+          }
+        : null
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       notifyError(`无法开始屏幕捕获：${message}`)
@@ -146,6 +160,7 @@ export function useVision(modelUrl: string, ortDir: string, handlers: VisionHand
     terminateWorker()
     state.state = 'idle'
     state.backend = null
+    state.sourceInfo = null
     state.started = false
     state.unstableStreak = 0
   }
@@ -154,5 +169,9 @@ export function useVision(modelUrl: string, ortDir: string, handlers: VisionHand
     post({ type: 'reset' })
   }
 
-  return { state, start, stop, resetTracker }
+  function ackDecision(decision: 'apply' | 'discard', canonical: Uint8Array): void {
+    post({ type: 'ack-decision', decision, canonical })
+  }
+
+  return { state, start, stop, resetTracker, ackDecision }
 }

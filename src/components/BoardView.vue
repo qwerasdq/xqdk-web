@@ -174,7 +174,7 @@ const cells = computed(() => {
     <!-- 合法落点 -->
     <g v-for="(t, i) in targetMarks" :key="`t${i}`">
       <circle v-if="!t.capture" :cx="t.cx" :cy="t.cy" r="12" fill="#3a7d44" opacity="0.7" />
-      <circle v-else :cx="t.cx" :cy="t.cy" r="CELL / 2 - 6" fill="none" stroke="#c0392b" stroke-width="4" stroke-dasharray="8 6" opacity="0.85" />
+      <circle v-else :cx="t.cx" :cy="t.cy" :r="CELL / 2 - 6" fill="none" stroke="#c0392b" stroke-width="4" stroke-dasharray="8 6" opacity="0.85" />
     </g>
     <!-- 建议箭头（支招模式） -->
     <g v-if="suggestArrow" pointer-events="none">

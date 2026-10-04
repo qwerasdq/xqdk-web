@@ -18,6 +18,10 @@ export class BoardTracker {
   private candidate: RecognitionResult | null = null
   private candidateHits = 0
 
+  /** 最近一次“确认新局”后，主线程返回的处理结果 */
+  private ackedApplied: Uint8Array | null = null
+  private ackedDiscarded: Uint8Array | null = null
+
   constructor(private readonly confirmCount = 3) {}
 
   reset(redGoFirst = true): void {
@@ -27,6 +31,28 @@ export class BoardTracker {
     this.unstableStreak = 0
     this.redGo = redGoFirst
     this.lastMovedSide = null
+    this.ackedApplied = null
+    this.ackedDiscarded = null
+  }
+
+  /** 主线程已处理/忽略某确认快照，避免同一快照反复触发 */
+  ackDecision(decision: 'apply' | 'discard', target: Uint8Array): void {
+    if (decision === 'apply') {
+      this.ackedApplied = target.slice()
+      this.ackedDiscarded = null
+    } else {
+      this.ackedDiscarded = target.slice()
+      this.ackedApplied = null
+    }
+  }
+
+  private hasAcked(target: Uint8Array): boolean {
+    if (this.ackedApplied) {
+      if (equal(target, this.ackedApplied)) return true
+      // 已应用的局面又变走一步时，旧 ack 不再抑制新局面
+      this.ackedApplied = null
+    }
+    return this.ackedDiscarded !== null && equal(target, this.ackedDiscarded)
   }
 
   /** 外部（悔棋/手动改盘后）重设确认局面，后续帧可正常重新确认 */
@@ -56,12 +82,19 @@ export class BoardTracker {
         this.candidateHits = 1
       }
       if (this.candidateHits >= this.confirmCount) {
-        this.confirmed = this.candidate
         const first = this.candidate
+        if (first && !this.hasAcked(first.canonical)) {
+          this.confirmed = first
+          this.candidate = null
+          this.candidateHits = 0
+          this.unstableStreak = 0
+          return matchStartCount(first.canonical) >= 32 ? 'NEW_GAME' : 'NEW_BOARD'
+        }
+        // 已处理过的同一快照不再重复提示
         this.candidate = null
         this.candidateHits = 0
         this.unstableStreak = 0
-        return matchStartCount(first.canonical) >= 32 ? 'NEW_GAME' : 'NEW_BOARD'
+        return 'SAME_BOARD'
       }
       this.unstableStreak++
       return 'UNSTABLE'
@@ -103,16 +136,23 @@ export class BoardTracker {
     }
     if (this.candidateHits >= this.confirmCount) {
       const newBoard = this.candidate
-      const moved = movedSide(prev.canonical, newBoard.canonical)
-      if (moved !== null) {
-        this.lastMovedSide = moved
-        this.redGo = moved !== 'red' // 移动方是红 => 下一手是黑
+      if (newBoard && !this.hasAcked(newBoard.canonical)) {
+        const moved = movedSide(prev.canonical, newBoard.canonical)
+        if (moved !== null) {
+          this.lastMovedSide = moved
+          this.redGo = moved !== 'red' // 移动方是红 => 下一手是黑
+        }
+        this.confirmed = newBoard
+        this.candidate = null
+        this.candidateHits = 0
+        this.unstableStreak = 0
+        return 'NEW_BOARD'
       }
-      this.confirmed = newBoard
+      // 已处理过的同一快照不再重复提示
       this.candidate = null
       this.candidateHits = 0
       this.unstableStreak = 0
-      return 'NEW_BOARD'
+      return 'SAME_BOARD'
     }
     this.unstableStreak++
     return 'UNSTABLE'

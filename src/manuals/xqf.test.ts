@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseXqf, mainLineMoves, countMoves } from './xqf'
+import type { MoveNode } from './xqf'
 import { Board } from '../xiangqi/board'
 import { Position } from '../xiangqi/position'
 import { Move } from '../xiangqi/move'
@@ -49,5 +50,17 @@ describe('XQF 解析', () => {
   it('头部版本号合法', () => {
     expect(manual!.version).toBeGreaterThanOrEqual(0x0a)
     expect(manual!.version).toBeLessThanOrEqual(0x20)
+  })
+
+  it('节点注解可读取（样例含 2 条注释）', () => {
+    const comments: string[] = []
+    const walk = (n: MoveNode): void => {
+      for (const c of n.nextMoves) {
+        if (c.comment) comments.push(c.comment)
+        walk(c)
+      }
+    }
+    walk(manual!.headMove)
+    expect(comments).toEqual(['1', '2'])
   })
 })

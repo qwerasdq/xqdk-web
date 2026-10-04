@@ -2,6 +2,66 @@
 
 Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v2.0）。
 
+## 2026-10-04 — 第 3 天（续）：W6c 人工验证支持 + 防误同步 + 复盘增强
+
+### 背景 / 续接
+
+- W6b 已提交（真实推理链路 + 自动同步），遗留三项：W6c 真实 JJ 窗口人工验证入口、
+  「FEN 重载仅手动确认」防误同步、复盘增强（PGN 变例嵌套 / 注解展示 / 引擎分析缓存）。
+
+### 本次交付
+
+| 文件 | 说明 |
+|---|---|
+| src/vision/sync.ts | 拆出**纯函数 `planSync`**（不改 Game，返回 noop/move/reload 计划）；`reconcileGame` 改为基于计划的应用包装；reload（FEN 重载）不再无条件执行 |
+| src/vision/boardTracker.ts | 新增 `ackDecision('apply' / 'discard', canonical)`：已确认/已丢弃的快照不再重复提示（`hasAcked` 抑制），离开该局面后标记自动清除 |
+| src/vision/useVision.ts | 状态机扩展 `awaiting-confirm`；新增 `sourceInfo`（捕获窗口名 + displaySurface）；暴露 `ackDecision` |
+| src/vision/capture.ts | `sourceInfo` getter（`track.label` + `getSettings().displaySurface`） |
+| src/features/assist/VisionControl.vue | 捕获来源摘要（"正在捕获：<窗口名>"）+ 待确认同步卡片（确认同步 / 丢弃按钮） |
+| src/App.vue | `pendingVision` 待确认状态：合法走子仍自动应用，**FEN 重载进入待确认**；确认才重载、丢弃则 ack 抑制；手动改盘/切模式清空 pending |
+| src/manuals/pgn.ts | **PGN 变例树解析重写**：嵌套括号 → 与 XQF 一致的 `MoveNode` 树；`{...}` 逐着法注释（跨空格/跨行）；变例语义双模式自动判定（标准 RAV 替代式 / 续着式，非法着法则整段跳过不影响主变）；主变用 `mainChild` 链独立追踪 |
+| src/features/review/ReviewView.vue | 复盘直接使用变例树（不再拍平）；分支按钮显示**中文着法**；新增注解区（XQF 全局注解 + 当前节点注释） |
+| src/engine/analysisCache.ts | **引擎分析缓存**（LRU 64 条）：键 = 规范化 FEN + 有序着法 + depth/movetime + 实际 MultiPV + 排序 excluded；命中直接回调终版结果不重搜 |
+| src/engine/useEngine.ts | `engineAnalyze` 接入缓存；仅自然完成的搜索写缓存（被新搜索 stop 的截断结果不缓存）；导出 `clearAnalysisCache` |
+| src/components/BoardView.vue | 修复吃子落点提示圈：`r="CELL / 2 - 6"` 漏写了绑定冒号，被当成 SVG 字面量 → 圈根本不渲染 |
+
+### 遇到的问题与解决
+
+1. **PGN 变例语义两难**：标准 RAV 是「替代前一着」（变例首着与被替代步同色同起点），
+   但实际棋谱也存在「续着式」（首着是前一着之后的下一着）写法。采样 dpxq/WXF 真实库
+   （4 万+ 局）发现均未用括号变例，参考实现 read_pgn.py 也未支持。
+   最终实现 `canParse` 合法性探测**双模式自动判定**：先按替代式探测（棋盘回退到被替代步之前），
+   失败再按续着式（被替代步之后），都失败则整段跳过——主变永不受损。
+2. **变例棋盘状态恢复**：用 `boardAfter` WeakMap 记录每步落子后局面，
+   进入变例/退出时精确恢复，解决了嵌套变例与括号后主变续着的解析错位。
+3. **缓存污染防护**：worker 内新搜索会 stop 旧搜索（旧 bestmove 提前返回），
+   若不区分会把「被截断的浅层结果」当终版缓存 → 用 `searchSeq === id` 判定仅缓存自然完成的结果。
+4. **测试期望与结构错位**：初期变例测试按错误的心理模型断言（层级搞反），
+   用 tsx 调试脚本 dump 实际树结构后按正确语义重写断言。
+5. **吃子提示圈不渲染（全功能 E2E 发现）**：`BoardView.vue` 吃子目标圈写成 `r="CELL / 2 - 6"`
+   （漏绑定冒号）→ 浏览器按字面量解析报 `Expected length, "CELL / 2 - 6"`，圈始终不显示。
+   改为 `:r="CELL / 2 - 6"` 后实测 `r="44"` 正常渲染。
+
+### 验证
+
+- 单元测试 **85 个全部通过**（规则 19 + XQF 6 + PGN 15 + vision 38 + engine 缓存 7）；
+  PGN 新增 6 个变例树用例（嵌套兄弟分支 / 续着式 / 标准 RAV / 注释挂载 / 非法变例跳过 / 根注释）
+- vue-tsc + `npm run build` 全绿；`bash scripts/deploy.sh --check --skip-tests` 本地校验通过（产物 34M）
+- **浏览器冒烟（Playwright + vite preview）**：导入含变例+注释的 PGN → 分支按钮显示中文
+  （"马8进7 / 马2进3"）→ 注解区显示"本步注解：开局完成" → 无控制台错误
+  （截图 `w6c_review_variations.png`）
+- W6c 人工验证入口已就绪：捕获来源窗口名 + 待确认/丢弃按钮；
+  真实 JJ 窗口验证依赖人工操作（真实屏幕捕获无法自动化）
+- **全功能浏览器 E2E（四模式）**：对弈走子+AI 应招正常、支招分析出 3 候选（副变+变例行正常）、
+  JJ 支招面板 + 识别控件齐备且合规声明在位、复盘变例切换±注解均正常；
+  控制台仅剩吃子提示圈 `r` 属性报错一条 → 已修复并复测通过
+  （截图 `w6c_full_e2e.png`）
+
+### 遗留 / 待办
+
+- [ ] W6c 真实 JJ 窗口人工验证（用新 UI：确认来源窗口 → 确认/丢弃待同步）
+- [ ] 移动端布局、音效、开局库（可选增强）
+
 ## 2026-10-04 — 第 3 天（续）：W6 屏幕识别自动同步（W6b 里程碑）
 
 ### 背景 / 续接

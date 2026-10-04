@@ -39,6 +39,15 @@ export class ScreenCapture {
     return this.stream
   }
 
+  get sourceInfo(): { label: string; displaySurface: string } | null {
+    const track = this.stream?.getVideoTracks()[0]
+    if (!track) return null
+    const settings = track.getSettings()
+    const label = track.label || '未知来源'
+    const surface = (settings.displaySurface as string) || 'unknown'
+    return { label, displaySurface: surface }
+  }
+
   /** 请求授权并开始抽帧。用户取消授权时抛 NotFoundError/NotAllowedError（由调用方分类提示） */
   async start(): Promise<void> {
     if (!ScreenCapture.isSupported()) throw new Error('当前浏览器不支持屏幕捕获（getDisplayMedia）')

@@ -1,7 +1,12 @@
 <script setup lang="ts">
 // JJ 自动识别控制：启动/停止 getDisplayMedia 屏幕捕获 + 当前后端（WebGPU/WASM）+ 稳定性
 import { computed } from 'vue'
-import type { Backend, VisionState } from '../../vision/useVision'
+import type { Backend, VisionSourceInfo, VisionState } from '../../vision/useVision'
+
+export interface PendingSyncSnapshot {
+  event: string
+  reason: string
+}
 
 const props = defineProps<{
   state: VisionState
@@ -9,11 +14,15 @@ const props = defineProps<{
   lastError: string
   unstableStreak: number
   started: boolean
+  sourceInfo: VisionSourceInfo | null
+  pendingSync: PendingSyncSnapshot | null
 }>()
 
 const emit = defineEmits<{
   (e: 'start'): void
   (e: 'stop'): void
+  (e: 'confirm-pending'): void
+  (e: 'discard-pending'): void
 }>()
 
 const isRunning = computed(() => props.state === 'capturing')
@@ -23,8 +32,15 @@ const statusText = computed(() => {
     case 'idle': return '未启动'
     case 'loading': return '加载模型…'
     case 'capturing': return `识别中（${props.backend ?? '…'}）`
+    case 'awaiting-confirm': return '待确认同步'
     case 'error': return '识别出错'
   }
+})
+const sourceLabel = computed(() => {
+  const s = props.sourceInfo
+  if (!s?.label) return ''
+  const kind = s.displaySurface === 'monitor' ? '显示器' : s.displaySurface === 'window' ? '窗口' : s.displaySurface === 'browser' ? '标签页' : '来源'
+  return `${s.label}（${kind}）`
 })
 </script>
 
@@ -42,6 +58,12 @@ const statusText = computed(() => {
         {{ state === 'error' ? '重试' : '开始捕获' }}
       </button>
       <button v-else class="small danger" @click="emit('stop')">停止</button>
+    </div>
+    <p v-if="sourceInfo && state !== 'idle'" class="source">{{ sourceLabel }}</p>
+    <div v-if="pendingSync" class="pending">
+      <span class="pending-text">识别到{{ pendingSync.event === 'NEW_GAME' ? '新对局' : '新局面' }}，{{ pendingSync.reason }}</span>
+      <button class="small primary" @click="emit('confirm-pending')">确认同步</button>
+      <button class="small danger" @click="emit('discard-pending')">丢弃</button>
     </div>
     <p v-if="state === 'error'" class="error">{{ lastError }}</p>
     <p class="note">
@@ -93,9 +115,34 @@ button.small {
   padding: 4px 12px;
   font-size: 13px;
 }
+button.small.primary {
+  border-color: #2e6bdb;
+  color: #2e6bdb;
+}
 button.small.danger {
   border-color: #e74c3c;
   color: #c0392b;
+}
+.source {
+  margin: 0;
+  font-size: 12px;
+  color: #666;
+}
+.pending {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border: 1px solid #e8b84b;
+  border-radius: 6px;
+  background: #fff7e0;
+  font-size: 12px;
+}
+.pending-text {
+  color: #8a6d3b;
+  flex: 1;
+  min-width: 150px;
 }
 .error {
   color: #c0392b;

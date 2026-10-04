@@ -139,6 +139,10 @@ self.onmessage = (e: MessageEvent<ToVisionWorker>): void => {
     case 'reset':
       tracker.reset()
       break
+    case 'ack-decision':
+      // 对最新一帧已确认 canonical 做决策；stale canonical 由 tracker internally 判断
+      tracker.ackDecision(msg.decision, msg.canonical)
+      break
     case 'dispose':
       void model?.session.release()
       model = null

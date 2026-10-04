@@ -16,8 +16,10 @@ import VisionLab from './vision/VisionLab.vue'
 import { buildPlans } from './features/assist/plans'
 import type { AssistPlan } from './features/assist/plans'
 import { useVision } from './vision/useVision'
-import type { MappedBoard } from './vision/types'
-import { reconcileGame } from './vision/sync'
+import type { MappedBoard, TrackerEvent } from './vision/types'
+import { planSync } from './vision/sync'
+import type { SyncPlan } from './vision/sync'
+import type { PendingSyncSnapshot } from './features/assist/VisionControl.vue'
 import { ucciToXY } from './xiangqi/pv'
 import {
   engineSearch,
@@ -89,25 +91,64 @@ const engineReady = computed(() => engineStatus.value === 'ready')
 const MODEL_URL = new URL(import.meta.env.BASE_URL + 'models/xq-yolo-640.onnx', location.href).href
 const ORT_DIR = new URL(import.meta.env.BASE_URL + 'ort/', location.href).href
 
+const pendingVision = ref<{
+  event: TrackerEvent
+  plan: SyncPlan & { kind: 'reload' }
+  mapped: MappedBoard
+  redGo: boolean
+} | null>(null)
+const visionPendingSnapshot = computed<PendingSyncSnapshot | null>(() => {
+  if (!pendingVision.value) return null
+  return {
+    event: pendingVision.value.event,
+    reason: pendingVision.value.plan.reason ?? '需手动确认同步',
+  }
+})
+
 const vision = useVision(MODEL_URL, ORT_DIR, {
   onFrame: (event, mapped, movedSide, redGo) => {
     if (event !== 'NEW_BOARD' && event !== 'NEW_GAME') return
     if (!mapped || !game.value) return
     const g = game.value
-    const r = reconcileGame(g, mapped, redGo)
-    if (r.applied === 'move') {
+    const plan = planSync(g, mapped, redGo)
+
+    // 新对局：按屏幕朝向自动判定我方（STANDARD=红在下方→我方红；FLIPPED→我方黑）
+    if (event === 'NEW_GAME' && mapped) {
+      mySide.value = mapped.orientation === 'FLIPPED' ? 'black' : 'red'
+    }
+
+    if (plan.kind === 'move') {
+      // 合法走子保留历史：自动应用
+      for (const step of plan.path ?? []) {
+        const st = g.movePiece(step.from, step.to)
+        if (st.status === GameStatus.ILLEGAL) {
+          // 理论上 planSync 已过滤，异常时进入待确认 reload
+          pendingVision.value = {
+            event,
+            plan: { kind: 'reload', fen: plan.fen ?? '', reason: '合法路径执行失败' },
+            mapped,
+            redGo,
+          }
+          vision.ackDecision('discard', mapped.canonical)
+          return
+        }
+      }
       boardVersion.value++
       if (g.isGameOver) status.value = g.updateGameStatus().status
       else if (isAssist.value && !g.isGameOver) refreshAssist()
-    } else if (r.applied === 'reload') {
-      // 已直接换盘（规则层无法生成到达该局面的合法走法）
-      boardVersion.value++
-      status.value = g.isGameOver ? g.updateGameStatus().status : GameStatus.MOVE
-      if (!g.isGameOver) refreshAssist()
-    }
-    // 新对局：按屏幕朝向自动判定我方（STANDARD=红在下方→我方红；FLIPPED→我方黑）
-    if (event === 'NEW_GAME') {
-      mySide.value = mapped.orientation === 'FLIPPED' ? 'black' : 'red'
+      vision.ackDecision('apply', mapped.canonical)
+    } else if (plan.kind === 'reload') {
+      // 无法用合法走法到达：不直接改盘，等待用户确认
+      if (pendingVision.value) vision.ackDecision('discard', pendingVision.value.mapped.canonical)
+      pendingVision.value = {
+        event,
+        plan: { kind: 'reload', fen: plan.fen ?? '', reason: plan.reason ?? '需手动确认同步' },
+        mapped,
+        redGo,
+      }
+      vision.state.state = 'awaiting-confirm'
+    } else {
+      vision.ackDecision('apply', mapped.canonical)
     }
     // 识别到对方刚走：刷新预案
     void movedSide
@@ -124,8 +165,35 @@ function onVisionStop(): void {
   vision.stop()
 }
 
+function confirmPendingVision(): void {
+  const p = pendingVision.value
+  if (!p) return
+  const g = game.value
+  const ok = p.plan.fen ? g.restoreFromFEN(p.plan.fen) : false
+  pendingVision.value = null
+  vision.state.state = ok ? 'capturing' : 'error'
+  if (ok) {
+    boardVersion.value++
+    status.value = g.updateGameStatus().status
+    if (!g.isGameOver && isAssist.value) refreshAssist()
+    vision.ackDecision('apply', p.mapped.canonical)
+  }
+}
+
+function discardPendingVision(): void {
+  const p = pendingVision.value
+  if (!p) return
+  pendingVision.value = null
+  vision.state.state = 'capturing'
+  vision.ackDecision('discard', p.mapped.canonical)
+  // 丢弃后让 tracker 接受当前待确认局面，避免同一快照再次提示
+  vision.resetTracker()
+}
+
 // 手动改盘后让识别重新收敛（避免自动同步覆盖刚手动摆的棋）
 function onManualBoardChange(): void {
+  pendingVision.value = null
+  vision.state.state = vision.state.started ? 'capturing' : vision.state.state
   if (vision.state.started) vision.resetTracker()
 }
 
@@ -538,11 +606,15 @@ function switchMode(m: Mode): void {
           :vision-error="vision.state.lastError"
           :vision-unstable-streak="vision.state.unstableStreak"
           :vision-started="vision.state.started"
+          :vision-source-info="vision.state.sourceInfo"
+          :vision-pending-sync="visionPendingSnapshot"
           @update:my-side="onMySideChange"
           @select-candidate="(u) => (selectedUcci = u)"
           @select-plan="(i) => (selectedPlan = i)"
           @vision-start="onVisionStart"
           @vision-stop="onVisionStop"
+          @vision-confirm-pending="confirmPendingVision"
+          @vision-discard-pending="discardPendingVision"
         />
 
         <div class="controls" v-if="!isReview">

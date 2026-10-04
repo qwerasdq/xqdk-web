@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { Game } from '../xiangqi/game'
 import { Position } from '../xiangqi/position'
 import { canonicalStart, piecesFromFen, toFen } from './assistBoard'
-import { reconcileGame } from './sync'
+import { planSync, reconcileGame } from './sync'
 import type { MappedBoard } from './types'
 
 function mappedOf(canonical: Uint8Array): MappedBoard {
@@ -84,6 +84,27 @@ describe('reconcileGame', () => {
     expect(r.applied).toBe('reload')
     expect(g.currentBoard.getPieceByXY(4, 4)).toBe(1) // WSHUAI
     expect(g.history.length).toBe(0)
+  })
+
+  it('planSync 对 move 不改变 Game，应用由 reconcileGame 执行', () => {
+    const g = new Game()
+    const plan = planSync(g, mappedOf(afterRedPawn()), true)
+    expect(plan.kind).toBe('move')
+    expect(plan.path?.[0]).toEqual({ from: new Position(7, 7), to: new Position(4, 7) })
+    expect(g.history.length).toBe(0) // 纯计划未应用
+    expect(g.currentBoard.bRedGo).toBe(true)
+  })
+
+  it('planSync 对 reload 不改变 Game，需确认后再应用', () => {
+    const g = new Game()
+    const weird = canonicalStart().slice()
+    weird[4 * 9 + 4] = weird[9 * 9 + 4]!
+    weird[9 * 9 + 4] = 0
+    const plan = planSync(g, mappedOf(weird), false)
+    expect(plan.kind).toBe('reload')
+    expect(plan.fen).toBeTruthy()
+    expect(g.history.length).toBe(0)
+    expect(g.currentBoard.piece[9]![4]).toBe(1) // 未重载，原帅仍在底线
   })
 
   it('无效局面返回 noop 且不破坏 Game', () => {

@@ -46,6 +46,97 @@ describe('PGN 解析', () => {
   })
 })
 
+describe('PGN 变例树', () => {
+  it('嵌套变例：替代式分支成为被替代步的兄弟', () => {
+    // 马2进3 替代马8进7；炮8平5 替代马2进3（与其兄弟，而非其续着）
+    const manual = parsePgn(`1. 炮二平五 马8进7 (1... 马2进3 (1... 炮8平5)) 2. 马二进三`)
+    expect(manual).not.toBeNull()
+    expect(manual!.moves.map((m) => m.ucci)).toEqual(['h2e2', 'h9g7', 'h0g2'])
+
+    const redPawn = manual!.headMove.nextMoves[0]!
+    expect(redPawn.chs).toBe('炮二平五')
+    expect(redPawn.nextMoves.length).toBe(3)
+
+    // 主变（nextMoves[0]）：马8进7 → 马二进三
+    const mainHorse = redPawn.nextMoves[0]!
+    expect(mainHorse.chs).toBe('马8进7')
+    expect(mainHorse.move!.getUCCIString()).toBe('h9g7')
+    expect(mainHorse.nextMoves.length).toBe(1)
+    expect(mainHorse.nextMoves[0]!.chs).toBe('马二进三')
+    expect(mainHorse.nextMoves[0]!.move!.getUCCIString()).toBe('h0g2')
+
+    // 变例分支1：马2进3（与马8进7兄弟，挂炮二平五下）
+    const var1 = redPawn.nextMoves[1]!
+    expect(var1.chs).toBe('马2进3')
+    expect(var1.move!.getUCCIString()).toBe('b9c7')
+    expect(var1.parent).toBe(redPawn)
+    expect(var1.nextMoves.length).toBe(0)
+
+    // 嵌套变例：炮8平5（替代马2进3，与马2进3兄弟）
+    const var2 = redPawn.nextMoves[2]!
+    expect(var2.chs).toBe('炮8平5')
+    expect(var2.move!.getUCCIString()).toBe('h7e7')
+    expect(var2.parent).toBe(redPawn)
+  })
+
+  it('续着式变例：括号内为下一步的替代走法，括号后主变继续', () => {
+    // (1... 马8进7 2. 马二进三) 是“炮二平五之后”的另一续着方案；
+    // 主变续着 1... 马2进3 排在括号后，主变链应为 [炮二平五, 马2进3]
+    const manual = parsePgn(`1. 炮二平五 (1... 马8进7 2. 马二进三) 1... 马2进3`)
+    expect(manual).not.toBeNull()
+    expect(manual!.moves.map((m) => m.ucci)).toEqual(['h2e2', 'b9c7'])
+
+    const redPawn = manual!.headMove.nextMoves[0]!
+    expect(redPawn.chs).toBe('炮二平五')
+    // 主变排在 nextMoves[0]（马2进3），变例分支在后
+    expect(redPawn.nextMoves.length).toBe(2)
+    expect(redPawn.nextMoves[0]!.chs).toBe('马2进3')
+    expect(redPawn.nextMoves[1]!.chs).toBe('马8进7')
+    expect(redPawn.nextMoves[1]!.nextMoves[0]!.chs).toBe('马二进三')
+  })
+
+  it('标准 RAV：括号后主变从被替代步之后继续', () => {
+    // 马2进3 替代马8进7；括号结束后主变从“马8进7 之后”继续 2. 马二进三
+    const manual = parsePgn(`1. 炮二平五 马8进7 (1... 马2进3) 2. 马二进三`)
+    expect(manual).not.toBeNull()
+    expect(manual!.moves.map((m) => m.ucci)).toEqual(['h2e2', 'h9g7', 'h0g2'])
+
+    const redPawn = manual!.headMove.nextMoves[0]!
+    expect(redPawn.nextMoves.length).toBe(2)
+    const mainHorse = redPawn.nextMoves[0]!
+    expect(mainHorse.chs).toBe('马8进7')
+    expect(mainHorse.nextMoves[0]!.chs).toBe('马二进三')
+    expect(redPawn.nextMoves[1]!.chs).toBe('马2进3')
+  })
+
+  it('变例注释挂到分支着法，主变注释挂到主变节点', () => {
+    const manual = parsePgn(`1. 炮二平五 {中炮开局} 马8进7 (1... 马2进3 {跳正马}) 2. 马二进三 {开局完成} 1-0`)
+    expect(manual).not.toBeNull()
+    expect(manual!.comment).toBeNull()
+    const redPawn = manual!.headMove.nextMoves[0]!
+    expect(redPawn.comment).toBe('中炮开局')
+    expect(redPawn.nextMoves[0]!.nextMoves[0]!.comment).toBe('开局完成')
+    expect(redPawn.nextMoves[1]!.comment).toBe('跳正马')
+    expect(manual!.result).toBe('1-0')
+  })
+
+  it('无法解析的变例整体跳过，主变不受影响', () => {
+    const manual = parsePgn(`1. 炮二平五 马8进7 (1... 炮8平5 (1... 马2进3)) 2. 马二进三`)
+    expect(manual).not.toBeNull()
+    expect(manual!.moves.map((m) => m.ucci)).toEqual(['h2e2', 'h9g7', 'h0g2'])
+    const redPawn = manual!.headMove.nextMoves[0]!
+    expect(redPawn.nextMoves[0]!.chs).toBe('马8进7')
+    expect(redPawn.nextMoves[0]!.nextMoves[0]!.chs).toBe('马二进三')
+  })
+
+  it('初始注释挂在根节点并保留为 PgnManual.comment', () => {
+    const manual = parsePgn(`{演示棋谱} 1. 炮二平五 马8进7`)
+    expect(manual).not.toBeNull()
+    expect(manual!.comment).toBe('演示棋谱')
+    expect(manual!.headMove.comment).toBe('演示棋谱')
+  })
+})
+
 describe('中文着法逆解析', () => {
   function makeBoard(moves: string[]): Board {
     const board = new Board()

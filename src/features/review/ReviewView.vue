@@ -5,7 +5,6 @@ import BoardView from '../../components/BoardView.vue'
 import EvalBar from '../../components/analysis/EvalBar.vue'
 import AnalysisPanel from '../../components/analysis/AnalysisPanel.vue'
 import { Board } from '../../xiangqi/board'
-import { Move } from '../../xiangqi/move'
 import { Position } from '../../xiangqi/position'
 import { parseXqf } from '../../manuals/xqf'
 import type { MoveNode, XqfManual } from '../../manuals/xqf'
@@ -24,6 +23,8 @@ interface ReviewManual {
   initBoard: Board
   root: MoveNode
   totalMoves: number
+  /** 全局注解（XQF 第 0 条 / PGN 根注释） */
+  globalComment: string | null
 }
 
 const manual = ref<ReviewManual | null>(null)
@@ -124,22 +125,14 @@ function fromXqf(m: XqfManual, filename: string): ReviewManual {
     initBoard: m.board.clone(),
     root: m.headMove,
     totalMoves: countNodes(m.headMove),
+    globalComment: m.annotation,
   }
 }
 
 function fromPgn(m: PgnManual, filename: string): ReviewManual {
   const initBoard = new Board()
   initBoard.restoreFromFEN(m.initFen)
-  // PGN 主变 → 单链树
-  const root: MoveNode = { move: null, comment: m.comment, nextMoves: [], parent: null }
-  let node = root
-  for (const { ucci } of m.moves) {
-    const mv = new Move(new Position(0, 0), new Position(0, 0))
-    if (!mv.fromUCCIString(ucci)) break
-    const next: MoveNode = { move: mv, comment: null, nextMoves: [], parent: node }
-    node.nextMoves.push(next)
-    node = next
-  }
+  // 直接使用解析出的变例树（含分支与逐节点注释）
   const headers = m.headers
   return {
     title: headers['event'] || filename,
@@ -148,8 +141,9 @@ function fromPgn(m: PgnManual, filename: string): ReviewManual {
     result: m.result === '*' ? '未知' : m.result === '1-0' ? '红胜' : m.result === '0-1' ? '黑胜' : '平局',
     event: headers['event'] ?? '',
     initBoard,
-    root,
-    totalMoves: m.moves.length,
+    root: m.headMove,
+    totalMoves: countNodes(m.headMove),
+    globalComment: m.comment,
   }
 }
 
@@ -199,6 +193,22 @@ function chooseBranch(node: MoveNode): void {
   path.value = newPath
   selectedUcci.value = null
 }
+
+/** 分支按钮文本：PGN 用原文中文，XQF 现算（当前局面即分支起点） */
+function branchLabel(n: MoveNode): string {
+  if (n.chs) return n.chs
+  if (!n.move) return '?'
+  const chs = n.move.getChsString(currentBoard.value)
+  return chs || n.move.getUCCIString()
+}
+
+/** 当前节点注解（根节点注释与全局注解相同时不重复显示） */
+const nodeComment = computed(() => {
+  const cur = currentNode.value
+  if (!cur || !cur.comment) return null
+  if (cur === manual.value?.root && cur.comment === manual.value.globalComment) return null
+  return cur.comment
+})
 
 // ---- 挂引擎分析 ----
 
@@ -280,8 +290,20 @@ watch([currentBoard, analyzeEnabled], () => {
             :class="{ active: path[path.length - 1] === b }"
             @click="chooseBranch(b)"
           >
-            {{ b.move?.getUCCIString() ?? '' }}
+            {{ branchLabel(b) }}
           </button>
+        </div>
+
+        <!-- 注解区：全局注解 + 当前节点注释 -->
+        <div class="annotation" v-if="manual.globalComment || nodeComment">
+          <div class="annotation-row" v-if="manual.globalComment">
+            <span class="annotation-label">全局注解</span>
+            <span class="annotation-text">{{ manual.globalComment }}</span>
+          </div>
+          <div class="annotation-row" v-if="nodeComment">
+            <span class="annotation-label">本步注解</span>
+            <span class="annotation-text">{{ nodeComment }}</span>
+          </div>
         </div>
 
         <!-- 挂引擎分析面板 -->
@@ -405,7 +427,6 @@ watch([currentBoard, analyzeEnabled], () => {
   color: #8a6d3b;
 }
 .branch {
-  font-family: monospace;
   font-size: 12px;
   padding: 4px 8px;
   border: 1px solid #c9a86a;
@@ -416,6 +437,31 @@ watch([currentBoard, analyzeEnabled], () => {
 .branch.active {
   background: #5a3a1e;
   color: #fff;
+}
+.annotation {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: #f2f7f2;
+  border: 1px solid #cfe3cf;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.annotation-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.annotation-label {
+  flex: 0 0 auto;
+  color: #4a7a4a;
+  font-weight: bold;
+}
+.annotation-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #333;
 }
 .analyze-row {
   display: flex;

@@ -124,6 +124,42 @@ describe('BoardTracker 多帧确认', () => {
     expect(tracker.redGo).toBe(true)
   })
 
+  it('ackDecision(discard) 后同一快照不再重复提示，离开后可再次确认', () => {
+    const start = canonicalStart()
+    const mid = midBoard()
+
+    const tracker = new BoardTracker(3)
+    tracker.reset(true)
+    // 先确认开局
+    for (let i = 0; i < 3; i++) tracker.onFrame(res(start))
+    // 新局（红走）
+    for (let i = 0; i < 2; i++) tracker.onFrame(res(mid))
+    expect(tracker.onFrame(res(mid))).toBe('NEW_BOARD')
+
+    // 主线程丢弃该快照
+    tracker.ackDecision('discard', mid)
+    // 同快照再次出现：不应再次 NEW_BOARD
+    expect(tracker.onFrame(res(mid))).toBe('SAME_BOARD')
+
+    // 离开该局面后（模拟屏幕移除）应清除丢弃标记
+    tracker.restore(res(start), true)
+    expect(tracker.onFrame(res(start))).toBe('SAME_BOARD')
+  })
+
+  it('ackDecision(apply) 后同局面不重复提示', () => {
+    const start = canonicalStart()
+    const mid = midBoard()
+
+    const tracker = new BoardTracker(3)
+    tracker.reset(true)
+    for (let i = 0; i < 3; i++) tracker.onFrame(res(start))
+    for (let i = 0; i < 3; i++) tracker.onFrame(res(mid))
+    expect(tracker.lastMovedSide).toBe('red')
+
+    tracker.ackDecision('apply', mid)
+    expect(tracker.onFrame(res(mid))).toBe('SAME_BOARD')
+  })
+
   it('restore 回退后可重新同步', () => {
     const start = canonicalStart()
     const mid = midBoard()

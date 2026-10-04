@@ -86,6 +86,7 @@ export type ToVisionWorker =
   | { type: 'init'; modelUrl: string; ortDir: string; ep: 'auto' | 'webgpu' | 'wasm' }
   | { type: 'frame'; id: number; bitmap: ImageBitmap; frameW: number; frameH: number }
   | { type: 'reset' }
+  | { type: 'ack-decision'; decision: 'apply' | 'discard'; canonical: Uint8Array }
   | { type: 'dispose' }
 
 export type FromVisionWorker =

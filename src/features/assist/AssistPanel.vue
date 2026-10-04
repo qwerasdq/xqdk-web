@@ -5,9 +5,9 @@
 import { computed } from 'vue'
 import AnalysisPanel from '../../components/analysis/AnalysisPanel.vue'
 import type { AnalysisLine } from '../../engine/useEngine'
-import type { Backend, VisionState } from '../../vision/useVision'
+import type { Backend, VisionSourceInfo, VisionState } from '../../vision/useVision'
 import type { AssistPlan } from './plans'
-import VisionControl from './VisionControl.vue'
+import VisionControl, { type PendingSyncSnapshot } from './VisionControl.vue'
 
 const props = defineProps<{
   fen: string
@@ -27,6 +27,8 @@ const props = defineProps<{
   visionError: string
   visionUnstableStreak: number
   visionStarted: boolean
+  visionSourceInfo: VisionSourceInfo | null
+  visionPendingSync: PendingSyncSnapshot | null
 }>()
 
 const emit = defineEmits<{
@@ -35,6 +37,8 @@ const emit = defineEmits<{
   (e: 'select-plan', index: number): void
   (e: 'vision-start'): void
   (e: 'vision-stop'): void
+  (e: 'vision-confirm-pending'): void
+  (e: 'vision-discard-pending'): void
 }>()
 
 const myTurn = computed(() => (props.redGo ? 'red' : 'black') === props.mySide)
@@ -54,8 +58,12 @@ const myTurn = computed(() => (props.redGo ? 'red' : 'black') === props.mySide)
       :last-error="visionError"
       :unstable-streak="visionUnstableStreak"
       :started="visionStarted"
+      :source-info="visionSourceInfo"
+      :pending-sync="visionPendingSync"
       @start="emit('vision-start')"
       @stop="emit('vision-stop')"
+      @confirm-pending="emit('vision-confirm-pending')"
+      @discard-pending="emit('vision-discard-pending')"
     />
 
     <div class="row">

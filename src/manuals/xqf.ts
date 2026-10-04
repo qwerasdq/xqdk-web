@@ -45,6 +45,8 @@ const PIECE_KINDS = [
 export interface MoveNode {
   move: Move | null
   comment: string | null
+  /** 中文着法（可选：PGN 变例展示用；XQF 可在主板中通过 Move 生成） */
+  chs?: string | null
   nextMoves: MoveNode[]
   parent: MoveNode | null
 }

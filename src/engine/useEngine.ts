@@ -5,6 +5,8 @@ import { ref, shallowRef } from 'vue'
 import { parseInfoLine, parseBestmoveLine, toRedScore, wdlToWinRate, cpToWinRate } from './uci'
 import type { EngineInfo, EngineScore, BestmoveResult } from './uci'
 import { workerSource } from './worker'
+import { createAnalysisCache, makeAnalysisCacheKey } from './analysisCache'
+import type { AnalysisCacheEntry } from './analysisCache'
 
 export type EngineStatus = 'idle' | 'loading' | 'ready' | 'error'
 
@@ -190,9 +192,18 @@ export interface AnalysisLine {
 
 const INFO_UPDATE_THROTTLE_MS = 100 // 分析面板节流（照抄 Android 版 100ms GUI 节流）
 
+/** 分析结果缓存（复盘步进/回退重复局面直接命中，不再重复搜索） */
+const analysisCache = createAnalysisCache(64)
+
+/** 清空分析缓存（引擎选项变化/新对局时可调用） */
+export function clearAnalysisCache(): void {
+  analysisCache.clear()
+}
+
 /**
  * MultiPV 分析：流式回调候选着法（按 multipv 分组，取各线最新 info），
  * bestmove 到达时 resolve。回调节流 100ms。
+ * 命中缓存时直接回调终版结果，不发起新搜索。
  */
 export async function engineAnalyze(
   req: SearchRequest,
@@ -200,8 +211,16 @@ export async function engineAnalyze(
 ): Promise<BestmoveResult> {
   await waitReady()
   const multipv = req.multipv ?? 3
-  ensureMultiPv(multipv)
   const sideToMove = req.fen.split(' ')[1] === 'b' ? 'b' : 'w'
+
+  const cacheKey = makeAnalysisCacheKey({ ...req, multipv })
+  const cached = analysisCache.get(cacheKey)
+  if (cached) {
+    onUpdate(cached.lines)
+    return cached.result
+  }
+
+  ensureMultiPv(multipv)
 
   return new Promise<BestmoveResult>((resolve, reject) => {
     const id = ++searchSeq
@@ -231,7 +250,13 @@ export async function engineAnalyze(
     pendingSearches.set(id, (r) => {
       clearTimeout(timer)
       unsubscribe()
-      onUpdate(toLines(collected, sideToMove)) // 终版
+      const lines = toLines(collected, sideToMove)
+      onUpdate(lines) // 终版
+      // 仅缓存自然完成（未被新搜索 stop）的结果，避免把浅层截断结果当终版缓存
+      if (searchSeq === id) {
+        const entry: AnalysisCacheEntry = { lines, result: r }
+        analysisCache.set(cacheKey, entry)
+      }
       resolve(r)
     })
 
