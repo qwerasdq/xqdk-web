@@ -65,6 +65,13 @@ export class Game {
     this.recordPosition()
   }
 
+  // 对局起始局面 FEN。
+  // 引擎 position 命令必须用它：`position fen <startFen> moves <history>`。
+  // 若改传「当前 FEN + 全历史」，历史着法在现局面中合法时会被重复应用（如马往返后）导致局面错误。
+  get startFen(): string {
+    return this.initialBoard.toFENString()
+  }
+
   // 从 FEN 初始化
   restoreFromFEN(fen: string): boolean {
     const ok = this.currentBoard.restoreFromFEN(fen)

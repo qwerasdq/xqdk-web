@@ -28,9 +28,10 @@ const MARGIN = 50
 const WIDTH = MARGIN * 2 + CELL * 8
 const HEIGHT = MARGIN * 2 + CELL * 9
 
-// 显示行（0 = 底部）→ 内部 y（0 = 黑方顶部行）
+// 内部 y → SVG 行号（0 = 屏幕上方的第一行）
+// 内部 y=0 是黑方底线 → 显示在顶部；y=9 是红方底线 → 显示在底部（红方在下）
 function displayY(y: number): number {
-  return 9 - y
+  return y
 }
 
 // 内部坐标 → SVG 像素坐标

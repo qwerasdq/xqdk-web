@@ -11,6 +11,9 @@ import BoardView from './components/BoardView.vue'
 import EvalBar from './components/analysis/EvalBar.vue'
 import AnalysisPanel from './components/analysis/AnalysisPanel.vue'
 import ReviewView from './features/review/ReviewView.vue'
+import AssistPanel from './features/assist/AssistPanel.vue'
+import { buildPlans } from './features/assist/plans'
+import type { AssistPlan } from './features/assist/plans'
 import { ucciToXY } from './xiangqi/pv'
 import {
   engineSearch,
@@ -40,11 +43,12 @@ const difficulty = computed(() => DIFFICULTIES[difficultyIndex.value]!)
 
 const { status: engineStatus, engineName, error: engineError } = useEngine()
 
-type Mode = 'game' | 'analyze' | 'review'
+type Mode = 'game' | 'analyze' | 'assist' | 'review'
 const mode = ref<Mode>('game')
 // template 判断用 computed（vue-tsc 会对 v-if 字面量比较做流收窄，跨元素传播导致误报）
 const isReview = computed(() => mode.value === 'review')
 const isAnalyze = computed(() => mode.value === 'analyze')
+const isAssist = computed(() => mode.value === 'assist')
 const isGame = computed(() => mode.value === 'game')
 // random_move：前 12 回合从 MultiPV 前 3 候选随机挑着（照抄 Android 版 GameController）
 const RANDOM_BEFORE_MAX_ROUNDS = 12
@@ -66,6 +70,13 @@ const analyzing = ref(false)
 const selectedUcci = ref<string | null>(null)
 let analysisSeq = 0 // 分析代次（过期检查）
 
+// ---- JJ 支招状态 ----
+const mySide = ref<'red' | 'black'>('red')
+const assistPlans = ref<AssistPlan[]>([])
+const plansLoading = ref(false)
+const selectedPlan = ref(-1)
+let plansSeq = 0 // 预案代次（过期检查）
+
 const engineReady = computed(() => engineStatus.value === 'ready')
 
 const statusText = computed(() => {
@@ -85,6 +96,10 @@ const statusText = computed(() => {
       return '非法着法'
     default:
       if (mode.value === 'analyze') return analyzing.value ? '分析中…' : '支招模式：轮到' + side + '走子'
+      if (mode.value === 'assist') {
+        const myTurn = (game.value.currentBoard.bRedGo ? 'red' : 'black') === mySide.value
+        return myTurn ? 'JJ 支招：轮到你走' : 'JJ 支招：轮到对方走'
+      }
       return aiThinking.value ? 'AI 思考中…' : `轮到${side}走子`
   }
 })
@@ -101,12 +116,22 @@ const moveList = computed(() => {
   return rows
 })
 
-// 建议箭头（选中的候选首着）
-const suggestMove = computed(() => {
-  if (!selectedUcci.value) return null
-  const xy = ucciToXY(selectedUcci.value)
+function ucciArrow(ucci: string | null): { from: Position; to: Position } | null {
+  if (!ucci) return null
+  const xy = ucciToXY(ucci)
   if (!xy) return null
   return { from: new Position(xy.fx, xy.fy), to: new Position(xy.tx, xy.ty) }
+}
+
+// 建议箭头：分析模式=选中候选；支招模式=我方回合选候选 / 对方回合选预案（画我方应手）
+const suggestMove = computed(() => {
+  if (isAssist.value) {
+    const myTurn = (game.value.currentBoard.bRedGo ? 'red' : 'black') === mySide.value
+    if (myTurn) return ucciArrow(selectedUcci.value)
+    const plan = assistPlans.value[selectedPlan.value]
+    return ucciArrow(plan ? plan.myUcci : null)
+  }
+  return ucciArrow(selectedUcci.value)
 })
 
 const analysisWinRate = computed(() => {
@@ -125,6 +150,8 @@ async function onDifficultyChange(): Promise<void> {
 }
 
 // 分析当前局面：MultiPV 3，流式更新候选（节流 100ms）
+// 位置传参：起始 FEN + 全历史（position fen <start> moves <...>），
+// 不可用「当前 FEN + 全历史」——历史着法在现局面合法时会被重复应用导致局面错误
 async function runAnalysis(): Promise<void> {
   if (!engineReady.value) return
   const g = game.value
@@ -133,7 +160,7 @@ async function runAnalysis(): Promise<void> {
   try {
     await engineAnalyze(
       {
-        fen: g.currentBoard.toFENString(),
+        fen: g.startFen,
         moves: g.history.map((h) => h.ucciString),
         depth: difficulty.value.depth,
         multipv: 3,
@@ -149,6 +176,58 @@ async function runAnalysis(): Promise<void> {
   }
 }
 
+// 对方回合：生成"若对方走 X，我方应 Y"预案（渐进显示）
+async function runPlans(token: number): Promise<void> {
+  const g = game.value
+  plansLoading.value = true
+  assistPlans.value = []
+  selectedPlan.value = -1
+  const isStale = () => token !== plansSeq || game.value !== g || g.isGameOver
+  try {
+    await buildPlans(
+      {
+        fen: g.startFen,
+        moves: g.history.map((h) => h.ucciString),
+        depth: difficulty.value.depth,
+        topN: 3,
+      },
+      (plan) => {
+        if (!isStale()) assistPlans.value = [...assistPlans.value, plan]
+      },
+      isStale,
+    )
+  } catch (err) {
+    console.error('预案生成失败:', err)
+  } finally {
+    if (token === plansSeq) plansLoading.value = false
+  }
+}
+
+// JJ 支招模式：按当前回合分派——我方回合出候选，对方回合出预案
+function refreshAssist(): void {
+  plansSeq++ // 使旧预案任务失效（无论接下来跑哪个）
+  analysisSeq++ // 使旧分析失效，避免污染清空后的面板
+  assistPlans.value = []
+  selectedPlan.value = -1
+  plansLoading.value = false
+  if (!engineReady.value || game.value.isGameOver) return
+  const myTurn = (game.value.currentBoard.bRedGo ? 'red' : 'black') === mySide.value
+  if (myTurn) {
+    selectedUcci.value = null
+    void runAnalysis()
+  } else {
+    analysisLines.value = []
+    selectedUcci.value = null
+    const token = plansSeq
+    void runPlans(token)
+  }
+}
+
+function onMySideChange(side: 'red' | 'black'): void {
+  mySide.value = side
+  refreshAssist()
+}
+
 // AI（黑方）应招：搜索 → 规则层校验（长将/困毙拦截）→ 落子
 // random_move：开启且回合 ≤12 时 MultiPV 3 搜索，从候选随机挑着（照抄 Android GameController）
 async function requestAiMove(): Promise<void> {
@@ -156,7 +235,7 @@ async function requestAiMove(): Promise<void> {
   aiThinking.value = true
   const g = game.value
   const snapshotRounds = g.history.length // 过期检查快照
-  const fen = g.currentBoard.toFENString()
+  const fen = g.startFen
   const moves = g.history.map((h) => h.ucciString)
   const useRandom = randomMoveEnabled.value && g.currentBoard.rounds <= RANDOM_BEFORE_MAX_ROUNDS
   const excluded: string[] = []
@@ -232,6 +311,7 @@ function onCellClick(x: number, y: number): void {
     boardVersion.value++
     if (!g.isGameOver) {
       if (mode.value === 'analyze') void runAnalysis() // 支招模式：实时分析
+      else if (mode.value === 'assist') refreshAssist() // JJ 支招：按回合分派
       else if (!g.currentBoard.bRedGo) void requestAiMove() // 对弈模式：AI 应招
     }
     return
@@ -259,9 +339,10 @@ async function newGame(): Promise<void> {
   selectedUcci.value = null
   boardVersion.value++
   if (engineReady.value) await engineNewGame()
+  if (isAssist.value) refreshAssist()
 }
 
-// 对弈模式悔棋撤两步（AI + 用户），分析模式撤一步
+// 对弈模式悔棋撤两步（AI + 用户），其他模式撤一步
 function undo(): void {
   const g = game.value
   if (g.history.length === 0 || g.isGameOver) return
@@ -279,6 +360,7 @@ function undo(): void {
   status.value = GameStatus.MOVE
   boardVersion.value++
   if (mode.value === 'analyze' && !g.isGameOver) void runAnalysis()
+  if (mode.value === 'assist') refreshAssist()
 }
 
 function loadFEN(): void {
@@ -298,6 +380,7 @@ function loadFEN(): void {
     fenInput.value = ''
     if (!g.isGameOver) {
       if (mode.value === 'analyze') void runAnalysis()
+      else if (mode.value === 'assist') refreshAssist() // 摆棋后按回合分派（JJ 中局接入）
       else if (!g.currentBoard.bRedGo) void requestAiMove() // 轮到黑方（AI）时自动应招
     }
   } else {
@@ -307,11 +390,22 @@ function loadFEN(): void {
 
 function switchMode(m: Mode): void {
   if (m === mode.value) return
+  const leavingAssist = mode.value === 'assist'
   mode.value = m
   analysisLines.value = []
   selectedUcci.value = null
+  if (leavingAssist) {
+    plansSeq++
+    assistPlans.value = []
+    selectedPlan.value = -1
+    plansLoading.value = false
+  }
   boardVersion.value++
   const g = game.value
+  if (m === 'assist') {
+    refreshAssist()
+    return
+  }
   if (!g.isGameOver && engineReady.value) {
     if (m === 'analyze') void runAnalysis()
     else if (!g.currentBoard.bRedGo) void requestAiMove()
@@ -337,6 +431,7 @@ function switchMode(m: Mode): void {
     <div class="mode-tabs">
       <button :class="{ active: isGame }" @click="switchMode('game')">对弈</button>
       <button :class="{ active: isAnalyze }" @click="switchMode('analyze')">支招分析</button>
+      <button :class="{ active: isAssist }" @click="switchMode('assist')">JJ 支招</button>
       <button :class="{ active: isReview }" @click="switchMode('review')">复盘</button>
     </div>
     <main class="layout">
@@ -348,7 +443,7 @@ function switchMode(m: Mode): void {
         :selected="selected"
         :legal-targets="legalTargets"
         :last-move="lastMove"
-        :suggest-move="isAnalyze ? suggestMove : null"
+        :suggest-move="isAnalyze || isAssist ? suggestMove : null"
         :disabled="!engineReady || aiThinking"
         @cell-click="onCellClick"
       />
@@ -367,6 +462,23 @@ function switchMode(m: Mode): void {
             @select="(u) => (selectedUcci = u)"
           />
         </div>
+
+        <!-- JJ 支招：我方候选 / 对方预案 + 合规提示 -->
+        <AssistPanel
+          v-if="isAssist"
+          :fen="game.currentBoard.toFENString()"
+          :my-side="mySide"
+          :red-go="game.currentBoard.bRedGo"
+          :lines="analysisLines"
+          :plans="assistPlans"
+          :plans-loading="plansLoading"
+          :analyzing="analyzing"
+          :selected-ucci="selectedUcci"
+          :selected-plan="selectedPlan"
+          @update:my-side="onMySideChange"
+          @select-candidate="(u) => (selectedUcci = u)"
+          @select-plan="(i) => (selectedPlan = i)"
+        />
 
         <div class="controls" v-if="!isReview">
           <label class="diff">

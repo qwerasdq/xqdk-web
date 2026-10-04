@@ -204,13 +204,15 @@ function chooseBranch(node: MoveNode): void {
 
 async function runReviewAnalysis(): Promise<void> {
   if (!analyzeEnabled.value || !manual.value) return
-  const b = currentBoard.value
+  const m = manual.value
   const seq = ++analysisSeq
   analyzing.value = true
   const moves = path.value.map((n) => n.move?.getUCCIString() ?? '')
   try {
     await engineAnalyze(
-      { fen: b.toFENString(), moves, depth: 16, multipv: 3 },
+      // 起始局面 + 路径着法（position fen <起始> moves <...>）；
+      // 不可用「当前局面 + 全路径」——着法在现局面合法时会被重复应用
+      { fen: m.initBoard.toFENString(), moves, depth: 16, multipv: 3 },
       (lines) => {
         if (seq === analysisSeq) analysisLines.value = lines
       },
