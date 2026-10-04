@@ -4,3 +4,5 @@ tsconfig.tsbuildinfo
 # 本机配置：npm 国内镜像不适用于 CI（美国 runner），本地权限配置因人而异
 .npmrc
 .claude/settings.local.json
+# 临时目录（模型提取等一次性操作）
+.tmp-vision/
