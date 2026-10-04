@@ -9,10 +9,13 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "vision:assets": "node scripts/vision-assets.mjs",
+    "postinstall": "node scripts/vision-assets.mjs",
     "deploy": "bash scripts/deploy.sh",
     "deploy:check": "bash scripts/deploy.sh --check"
   },
   "dependencies": {
+    "onnxruntime-web": "~1.22.0",
     "vue": "^3.5.13"
   },
   "devDependencies": {

@@ -12,8 +12,12 @@ import EvalBar from './components/analysis/EvalBar.vue'
 import AnalysisPanel from './components/analysis/AnalysisPanel.vue'
 import ReviewView from './features/review/ReviewView.vue'
 import AssistPanel from './features/assist/AssistPanel.vue'
+import VisionLab from './vision/VisionLab.vue'
 import { buildPlans } from './features/assist/plans'
 import type { AssistPlan } from './features/assist/plans'
+import { useVision } from './vision/useVision'
+import type { MappedBoard } from './vision/types'
+import { reconcileGame } from './vision/sync'
 import { ucciToXY } from './xiangqi/pv'
 import {
   engineSearch,
@@ -50,6 +54,8 @@ const isReview = computed(() => mode.value === 'review')
 const isAnalyze = computed(() => mode.value === 'analyze')
 const isAssist = computed(() => mode.value === 'assist')
 const isGame = computed(() => mode.value === 'game')
+// 调试入口：静态截图验证完整识别管线（不加载引擎/棋盘）
+const isVisionLab = computed(() => new URLSearchParams(location.search).get('visionLab') === '1')
 // random_move：前 12 回合从 MultiPV 前 3 候选随机挑着（照抄 Android 版 GameController）
 const RANDOM_BEFORE_MAX_ROUNDS = 12
 const randomMoveEnabled = ref(true)
@@ -78,6 +84,50 @@ const selectedPlan = ref(-1)
 let plansSeq = 0 // 预案代次（过期检查）
 
 const engineReady = computed(() => engineStatus.value === 'ready')
+
+// ---- W6b：屏幕识别自动同步 ----
+const MODEL_URL = new URL(import.meta.env.BASE_URL + 'models/xq-yolo-640.onnx', location.href).href
+const ORT_DIR = new URL(import.meta.env.BASE_URL + 'ort/', location.href).href
+
+const vision = useVision(MODEL_URL, ORT_DIR, {
+  onFrame: (event, mapped, movedSide, redGo) => {
+    if (event !== 'NEW_BOARD' && event !== 'NEW_GAME') return
+    if (!mapped || !game.value) return
+    const g = game.value
+    const r = reconcileGame(g, mapped, redGo)
+    if (r.applied === 'move') {
+      boardVersion.value++
+      if (g.isGameOver) status.value = g.updateGameStatus().status
+      else if (isAssist.value && !g.isGameOver) refreshAssist()
+    } else if (r.applied === 'reload') {
+      // 已直接换盘（规则层无法生成到达该局面的合法走法）
+      boardVersion.value++
+      status.value = g.isGameOver ? g.updateGameStatus().status : GameStatus.MOVE
+      if (!g.isGameOver) refreshAssist()
+    }
+    // 新对局：按屏幕朝向自动判定我方（STANDARD=红在下方→我方红；FLIPPED→我方黑）
+    if (event === 'NEW_GAME') {
+      mySide.value = mapped.orientation === 'FLIPPED' ? 'black' : 'red'
+    }
+    // 识别到对方刚走：刷新预案
+    void movedSide
+  },
+  onError: (message) => {
+    console.error('[vision]', message)
+  },
+})
+
+function onVisionStart(): void {
+  void vision.start('auto')
+}
+function onVisionStop(): void {
+  vision.stop()
+}
+
+// 手动改盘后让识别重新收敛（避免自动同步覆盖刚手动摆的棋）
+function onManualBoardChange(): void {
+  if (vision.state.started) vision.resetTracker()
+}
 
 const statusText = computed(() => {
   const side = game.value.currentBoard.bRedGo ? '红方' : '黑方'
@@ -142,7 +192,7 @@ const analysisWinRate = computed(() => {
 // ---- 引擎 ----
 
 onMounted(() => {
-  initEngine()
+  if (!isVisionLab.value) initEngine()
 })
 
 async function onDifficultyChange(): Promise<void> {
@@ -225,6 +275,7 @@ function refreshAssist(): void {
 
 function onMySideChange(side: 'red' | 'black'): void {
   mySide.value = side
+  if (vision.state.started) vision.resetTracker()
   refreshAssist()
 }
 
@@ -309,6 +360,7 @@ function onCellClick(x: number, y: number): void {
     legalTargets.value = []
     selectedUcci.value = null
     boardVersion.value++
+    onManualBoardChange()
     if (!g.isGameOver) {
       if (mode.value === 'analyze') void runAnalysis() // 支招模式：实时分析
       else if (mode.value === 'assist') refreshAssist() // JJ 支招：按回合分派
@@ -338,6 +390,7 @@ async function newGame(): Promise<void> {
   analysisLines.value = []
   selectedUcci.value = null
   boardVersion.value++
+  onManualBoardChange()
   if (engineReady.value) await engineNewGame()
   if (isAssist.value) refreshAssist()
 }
@@ -359,6 +412,7 @@ function undo(): void {
   selectedUcci.value = null
   status.value = GameStatus.MOVE
   boardVersion.value++
+  onManualBoardChange()
   if (mode.value === 'analyze' && !g.isGameOver) void runAnalysis()
   if (mode.value === 'assist') refreshAssist()
 }
@@ -377,6 +431,7 @@ function loadFEN(): void {
     status.value = s.status
     perpetualCheckSide.value = s.perpetualCheckSide
     boardVersion.value++
+    onManualBoardChange()
     fenInput.value = ''
     if (!g.isGameOver) {
       if (mode.value === 'analyze') void runAnalysis()
@@ -435,6 +490,8 @@ function switchMode(m: Mode): void {
       <button :class="{ active: isReview }" @click="switchMode('review')">复盘</button>
     </div>
     <main class="layout">
+      <VisionLab v-if="isVisionLab" />
+      <template v-else>
       <ReviewView v-if="isReview" class="review-view" />
       <template v-else>
       <BoardView
@@ -444,6 +501,7 @@ function switchMode(m: Mode): void {
         :legal-targets="legalTargets"
         :last-move="lastMove"
         :suggest-move="isAnalyze || isAssist ? suggestMove : null"
+        :flipped="isAssist && mySide === 'black'"
         :disabled="!engineReady || aiThinking"
         @cell-click="onCellClick"
       />
@@ -475,9 +533,16 @@ function switchMode(m: Mode): void {
           :analyzing="analyzing"
           :selected-ucci="selectedUcci"
           :selected-plan="selectedPlan"
+          :vision-state="vision.state.state"
+          :vision-backend="vision.state.backend"
+          :vision-error="vision.state.lastError"
+          :vision-unstable-streak="vision.state.unstableStreak"
+          :vision-started="vision.state.started"
           @update:my-side="onMySideChange"
           @select-candidate="(u) => (selectedUcci = u)"
           @select-plan="(i) => (selectedPlan = i)"
+          @vision-start="onVisionStart"
+          @vision-stop="onVisionStop"
         />
 
         <div class="controls" v-if="!isReview">
@@ -511,6 +576,7 @@ function switchMode(m: Mode): void {
           </tbody>
         </table>
       </aside>
+      </template>
       </template>
     </main>
   </div>

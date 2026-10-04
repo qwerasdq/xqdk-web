@@ -133,15 +133,19 @@ describe('BoardTracker 多帧确认', () => {
     for (let i = 0; i < 3; i++) tracker.onFrame(res(start))
     for (let i = 0; i < 3; i++) tracker.onFrame(res(mid))
     expect(tracker.redGo).toBe(false)
+    expect(tracker.lastMovedSide).toBe('red') // 红刚走完
 
     // 悔棋：恢复到开局（红先），随后同局面帧应视为未变化
     tracker.restore(res(start), true)
     expect(tracker.redGo).toBe(true)
+    expect(tracker.lastMovedSide).toBeNull()
     expect(tracker.onFrame(res(start))).toBe('SAME_BOARD')
     expect(tracker.redGo).toBe(true)
+    expect(tracker.lastMovedSide).toBeNull()
 
     // 屏幕仍是走子后的局面：照常重新确认，轮次按移动方翻转
     for (let i = 0; i < 3; i++) tracker.onFrame(res(mid))
     expect(tracker.redGo).toBe(false)
+    expect(tracker.lastMovedSide).toBe('red')
   })
 })

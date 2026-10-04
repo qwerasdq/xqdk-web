@@ -1,10 +1,13 @@
 <script setup lang="ts">
 // JJ 支招面板（手动摆棋同步）：我方执红/黑 + 回合提示 + 我方候选 + 对方应对预案 + 合规提示
 // 设计对齐 Android 版 assist-helper：对方回合引擎算力为我方所用（"若对方走X，我方应Y"）
+// W6b：自动识别屏幕棋盘（getDisplayMedia，只读捕获）实时同步
 import { computed } from 'vue'
 import AnalysisPanel from '../../components/analysis/AnalysisPanel.vue'
 import type { AnalysisLine } from '../../engine/useEngine'
+import type { Backend, VisionState } from '../../vision/useVision'
 import type { AssistPlan } from './plans'
+import VisionControl from './VisionControl.vue'
 
 const props = defineProps<{
   fen: string
@@ -19,12 +22,19 @@ const props = defineProps<{
   analyzing: boolean
   selectedUcci: string | null
   selectedPlan: number
+  visionState: VisionState
+  visionBackend: Backend | null
+  visionError: string
+  visionUnstableStreak: number
+  visionStarted: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'update:mySide', side: 'red' | 'black'): void
   (e: 'select-candidate', ucci: string): void
   (e: 'select-plan', index: number): void
+  (e: 'vision-start'): void
+  (e: 'vision-stop'): void
 }>()
 
 const myTurn = computed(() => (props.redGo ? 'red' : 'black') === props.mySide)
@@ -37,6 +47,16 @@ const myTurn = computed(() => (props.redGo ? 'red' : 'black') === props.mySide)
       仅限休闲对局的学习辅助：本工具<strong>无自动走子、无任何注入</strong>，只显示建议由你手动落子。
       严禁在排位赛、比赛或任何禁止辅助的场合使用，违规后果自负。
     </div>
+
+    <VisionControl
+      :state="visionState"
+      :backend="visionBackend"
+      :last-error="visionError"
+      :unstable-streak="visionUnstableStreak"
+      :started="visionStarted"
+      @start="emit('vision-start')"
+      @stop="emit('vision-stop')"
+    />
 
     <div class="row">
       <span class="label">我方执</span>

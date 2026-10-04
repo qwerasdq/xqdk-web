@@ -89,7 +89,7 @@ export type ToVisionWorker =
   | { type: 'dispose' }
 
 export type FromVisionWorker =
-  | { type: 'ready'; ep: 'webgpu' | 'wasm'; modelBytes: number; loadMs: number }
+  | { type: 'ready'; ep: 'webgpu' | 'wasm'; loadMs: number }
   | { type: 'init-error'; stage: 'fetch' | 'session' | 'ep'; message: string }
   | {
       type: 'frame-result'
@@ -99,6 +99,8 @@ export type FromVisionWorker =
       mapped: MappedBoard | null
       event: TrackerEvent
       movedSide: 'red' | 'black' | null
+      /** tracker 推断的当前行棋方（协同步 / UI 显示用，权威以 Game 为准） */
+      redGo: boolean
       unstableStreak: number
       timings: { pre: number; infer: number; post: number }
     }

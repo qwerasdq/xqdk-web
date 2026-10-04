@@ -42,6 +42,18 @@ for f in pikafish.js pikafish.wasm pikafish.data; do
 done
 echo "    pikafish.js / .wasm / .data 齐备"
 
+# ---- 1b. 识别模型与 ORT 运行时检查（W6b，不进 git，缺失时提示来源）----
+echo "==> 检查识别资产"
+[ -f "public/models/xq-yolo-640.onnx" ] || { echo "[x] 缺少 public/models/xq-yolo-640.onnx（来源见 public/models/README.md）"; exit 1; }
+[ -f "public/ort/ort-wasm-simd-threaded.jsep.wasm" ] || { echo "[x] 缺少 ORT wasm —— 先执行: node scripts/vision-assets.mjs"; exit 1; }
+ORT_SIZE="$(stat -c %s public/ort/ort-wasm-simd-threaded.jsep.wasm 2>/dev/null || stat -f %z public/ort/ort-wasm-simd-threaded.jsep.wasm)"
+if [ "$ORT_SIZE" -gt $((25 * 1024 * 1024)) ]; then
+  echo "[x] ORT wasm ${ORT_SIZE} 字节超过 Cloudflare 单文件 25 MiB 上限 —— 需降级 onnxruntime-web 版本"
+  exit 1
+fi
+ORT_MIB="$(awk -v s="$ORT_SIZE" 'BEGIN { printf "%.1f", s/1048576 }')"
+echo "    xq-yolo-640.onnx / ORT wasm(${ORT_MIB} MiB) 齐备"
+
 # ---- 2. 测试 + 构建 ----
 if [ "$SKIP_TESTS" -eq 0 ]; then
   echo "==> 单元测试"
@@ -59,8 +71,10 @@ grep -q "Cross-Origin-Embedder-Policy" dist/_headers || { echo "[x] _headers 缺
 for f in pikafish.js pikafish.wasm pikafish.data; do
   [ -f "dist/engine/$f" ] || { echo "[x] dist/engine/$f 缺失"; exit 1; }
 done
+[ -f "dist/models/xq-yolo-640.onnx" ] || { echo "[x] dist/models/xq-yolo-640.onnx 缺失"; exit 1; }
+[ -f "dist/ort/ort-wasm-simd-threaded.jsep.wasm" ] || { echo "[x] dist/ort/wasm 缺失（运行 node scripts/vision-assets.mjs）"; exit 1; }
 SIZE="$(du -sh dist | cut -f1)"
-echo "    产物 OK（index.html / _headers(COOP+COEP) / engine×3，共 $SIZE）"
+echo "    产物 OK（index.html / _headers(COOP+COEP) / engine×3 / models / ort，共 $SIZE）"
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
   echo "==> --check 模式：本地校验通过，跳过部署"

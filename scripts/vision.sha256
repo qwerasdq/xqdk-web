@@ -1,1 +1,4 @@
 c51a772997ad1c44b360281363cd4138d86a3f5afcc424b00866397ee9a064d7 *public/models/xq-yolo-640.onnx
+b45970d0632383a057c27ca5b660b216f8e00c17cf8db9f6207b5e4abc839368 *public/ort/ort-wasm-simd-threaded.jsep.wasm
+1cbcba8f2c769c1eecbab66a1b1e55ef11704515bf4306373e3db3c37cf6dcd8 *public/ort/ort-wasm-simd-threaded.jsep.mjs
+a0d26cfdf06fd173530cded55bedd5c6e077da861bc1b2aa7551e8772292fa76 *public/ort/VERSION

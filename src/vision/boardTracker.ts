@@ -12,6 +12,8 @@ export class BoardTracker {
   redGo = true
   /** 连续未确认帧数（用于提示） */
   unstableStreak = 0
+  /** 最近一次确认新局面的移动方（由前后局面 diff 推断；非 NEW_BOARD 时为 null） */
+  lastMovedSide: 'red' | 'black' | null = null
 
   private candidate: RecognitionResult | null = null
   private candidateHits = 0
@@ -24,6 +26,7 @@ export class BoardTracker {
     this.candidateHits = 0
     this.unstableStreak = 0
     this.redGo = redGoFirst
+    this.lastMovedSide = null
   }
 
   /** 外部（悔棋/手动改盘后）重设确认局面，后续帧可正常重新确认 */
@@ -33,9 +36,11 @@ export class BoardTracker {
     this.candidate = null
     this.candidateHits = 0
     this.unstableStreak = 0
+    this.lastMovedSide = null
   }
 
   onFrame(res: RecognitionResult): TrackerEvent {
+    this.lastMovedSide = null
     const prev = this.confirmed
     if (!isResultValid(res)) {
       this.unstableStreak++
@@ -100,6 +105,7 @@ export class BoardTracker {
       const newBoard = this.candidate
       const moved = movedSide(prev.canonical, newBoard.canonical)
       if (moved !== null) {
+        this.lastMovedSide = moved
         this.redGo = moved !== 'red' // 移动方是红 => 下一手是黑
       }
       this.confirmed = newBoard

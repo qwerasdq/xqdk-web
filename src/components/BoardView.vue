@@ -13,6 +13,8 @@ const props = defineProps<{
   lastMove: { from: Position; to: Position } | null
   /** 建议着法（支招箭头），from → to */
   suggestMove?: { from: Position; to: Position } | null
+  /** 180° 翻转棋盘：我方执黑时黑方在底部 */
+  flipped?: boolean
   disabled?: boolean
 }>()
 
@@ -30,13 +32,15 @@ const HEIGHT = MARGIN * 2 + CELL * 9
 
 // 内部 y → SVG 行号（0 = 屏幕上方的第一行）
 // 内部 y=0 是黑方底线 → 显示在顶部；y=9 是红方底线 → 显示在底部（红方在下）
+// flipped 时整体 180°：行号倒序 + 列号镜像，令牌（棋子/箭头/热区）经 px() 统一跟随，
+// 网格/河界/九宫左右、上下对称，无需单独调整
 function displayY(y: number): number {
-  return y
+  return props.flipped ? 9 - y : y
 }
 
 // 内部坐标 → SVG 像素坐标
 function px(x: number, y: number): { cx: number; cy: number } {
-  return { cx: MARGIN + x * CELL, cy: MARGIN + displayY(y) * CELL }
+  return { cx: MARGIN + (props.flipped ? 8 - x : x) * CELL, cy: MARGIN + displayY(y) * CELL }
 }
 
 const pieces = computed(() => {

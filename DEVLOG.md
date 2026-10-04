@@ -2,6 +2,56 @@
 
 Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v2.0）。
 
+## 2026-10-04 — 第 3 天（续）：W6 屏幕识别自动同步（W6b 里程碑）
+
+### 背景 / 续接
+
+- W5 已完成 JJ 手动摆棋支招 MVP；W6 拆成：
+
+  - W6a：识别算法层移植（YOLO 后处理 / 棋盘映射 / 多帧跟踪 + 模型入库）
+  - W6b：浏览器内真实推理链路 + 主线程自动同步 Game
+  - W6c：真实屏幕捕获界面验证（依赖真实 JJ 窗口，留作人工/后续验证项）
+
+- 当前工作区已有 W6a/W6b 代码（vision/ + App 接线 + VisionControl / VisionLab + 部署脚本），本次继续收尾验证。
+
+### 本次变更（收尾 W6b）
+
+- 修正 `worker.ts` 两个轻量收尾点：
+
+  - `dispose` 时释放 ORT session
+  - 补齐 `init-error` 的 `stage: 'fetch'` 分支（原有类型已声明，但 fetch 失败走 session 分支，归因不准）
+
+- `VisionControl` 增加自动识别控制入口，接线 `useVision`：
+
+  - 开始捕获 / 停止，错误与不稳定提示
+  - 状态机 `idle → loading → capturing → error`
+
+- `App.vue` 接入自动同步：
+
+  - NEW_BOARD / NEW_GAME 识别结果 → `reconcileGame` 应用到当前 Game（优先合法走子保留历史，失败再 FEN 重载）
+  - 自动按朝向切我方执红/黑；手动摆棋/悔棋/新局/切模式后重置 tracker，避免旧快照覆盖
+
+- 部署/构建链：
+
+  - `scripts/vision-assets.mjs` 复制 ORT wasm 到 `public/ort/`（postinstall + build 前置）
+  - `scripts/deploy.sh` 校验模型与 ORT 资产、单文件 25 MiB 上限
+  - `vite.config.ts` 给模型/ORT 配置 PWA runtime cache，且用 extern-wasm 条件避免重复拷贝
+  - `.gitignore` 忽略 `public/ort/` 与调试样本 `public/samples/`
+
+### 验证
+
+- 单元测试：67 个全部通过（规则 19 + XQF 5 + PGN 9 + vision 系列；新增 reconcile redGo 与 tracker lastMovedSide 覆盖）
+- 黑方视角翻转：JJ 支招切我方执黑后，`将` 从 y≈210 移到 y≈770、`帅` 从 y≈770 移到 y≈210，180° 翻转生效；渲染层翻转不影响内部坐标/点击/箭头（Playwright 实测）
+- 构建：`npm run build` 全绿
+- `npm run build`（vue-tsc + vite）全绿，产物含 `models/xq-yolo-640.onnx`、`ort-wasm-simd-threaded.jsep.wasm`、`pikafish.*`
+- `vite preview` 冒烟：主页与 `?visionLab=1` 无页面错误；断言 COOP/COEP 响应头、模型 / ORT / 引擎资产均 200 可访问
+- 截图：`w6_main.png`、`w6_visionLab.png`（工作区未提交入口图）
+
+### 遗留 / 待办
+- [ ] W6c：真实 JJ 窗口屏幕捕获验证（模型识别/自动同步需要真实窗口人工确认；`?visionLab=1` 用静态样本/样本推理）
+- [ ] 自动识别时若 Game 与 JJ 局面不一致，当前 `reconcileGame` 会 FEN 重载并清历史；可后续加“仅手动确认后重载”防误同步
+- [ ] 复盘增强：PGN 变例括号嵌套、XQF 注解展示、引擎分析缓存
+
 ## 2026-10-03 — 第 1 天：工程搭建 + 规则层移植（W1 里程碑）
 
 ### 环境准备

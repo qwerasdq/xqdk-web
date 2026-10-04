@@ -6,3 +6,9 @@ tsconfig.tsbuildinfo
 .claude/settings.local.json
 # 临时目录（模型提取等一次性操作）
 .tmp-vision/
+
+# ORT 运行时资产由 scripts/vision-assets.mjs 从 node_modules 复制（不入 git）
+public/ort/
+
+# 视觉调试样本图（从 D:\chess-dike\docs\images 复制，测试后删除）
+public/samples/

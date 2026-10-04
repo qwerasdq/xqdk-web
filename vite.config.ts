@@ -33,11 +33,28 @@ export default defineConfig({
               },
             },
           },
+          {
+            // 识别模型 + ORT wasm（均 >5MiB，不入 precache，部署后首次加载会缓存）
+            urlPattern: /\/(models|ort)\/.*/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'vision-assets',
+              expiration: {
+                maxEntries: 20,
+                maxAgeSeconds: 60 * 60 * 24 * 365,
+              },
+            },
+          },
         ],
       },
     }),
   ],
   base: './',
+  resolve: {
+    // onnxruntime-web 的 extern-wasm 入口：不内联 jsep.wasm，
+    // 运行时通过 env.wasm.wasmPaths 从 public/ort/ 加载，避免 Vite 把它复制成另一份 hash asset
+    conditions: ['onnxruntime-web-use-extern-wasm', 'import', 'module', 'browser', 'default'],
+  },
   // Pikafish WASM 为 pthread 构建，需要 SharedArrayBuffer（跨源隔离）
   server: {
     headers: {
