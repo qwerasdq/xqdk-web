@@ -31,7 +31,7 @@ for arg in "$@"; do
   esac
 done
 
-# ---- 1. 引擎产物检查（不进 git，缺失时提示来源）----
+# ---- 1. 引擎产物检查（已入库，SHA256 见 scripts/engine.sha256）----
 echo "==> 检查引擎产物"
 for f in pikafish.js pikafish.wasm pikafish.data; do
   if [ ! -f "public/engine/$f" ]; then
@@ -42,7 +42,9 @@ for f in pikafish.js pikafish.wasm pikafish.data; do
 done
 echo "    pikafish.js / .wasm / .data 齐备"
 
-# ---- 1b. 识别模型与 ORT 运行时检查（W6b，不进 git，缺失时提示来源）----
+# ---- 1b. 识别模型与 ORT 运行时检查（W6b）----
+# 模型 xq-yolo-640.onnx 已入库（SHA256 见 scripts/vision.sha256）；ORT 运行时由
+# scripts/vision-assets.mjs 从 node_modules 生成，不入 git（见 .gitignore）。
 echo "==> 检查识别资产"
 [ -f "public/models/xq-yolo-640.onnx" ] || { echo "[x] 缺少 public/models/xq-yolo-640.onnx（来源见 public/models/README.md）"; exit 1; }
 [ -f "public/ort/ort-wasm-simd-threaded.jsep.wasm" ] || { echo "[x] 缺少 ORT wasm —— 先执行: node scripts/vision-assets.mjs"; exit 1; }

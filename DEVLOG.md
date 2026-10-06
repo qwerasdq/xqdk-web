@@ -2,6 +2,41 @@
 
 Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v2.0）。
 
+## 2026-10-06 — 仓库体检与二进制资产 git 策略对齐
+
+### 背景
+
+- 例行体检：103 个单测全过，`vue-tsc` + `vite build` 全绿，`dist` 产物完整（`_headers` COOP/COEP、engine×3、models、ort）；
+  `public/engine/*`、`xq-yolo-640.onnx`、ORT wasm 的 SHA256 与 `scripts/*.sha256` 逐条一致。
+- 发现文档与事实不符：CLAUDE.md / `scripts/deploy.sh` 写「引擎产物不进 git」，
+  但 `public/engine/{pikafish.js,wasm,data}` 与 `public/models/xq-yolo-640.onnx` 实际已被 git 跟踪。
+
+### 结论：二进制资产继续入库，修正文档
+
+- 正式部署走 Cloudflare Workers Builds（Git 集成），构建命令 `npm ci && npx vitest run && npm run build`，
+  仓库内**没有**下载引擎/模型的步骤（`.github/workflows/deploy.yml` 已于 10-03 移除）。
+  把二进制移出 git 会让线上构建产出缺 `engine/`、`models/` 的坏包 —— 必须入库。
+- `public/ort/` 仍不入 git（postinstall 由 `scripts/vision-assets.mjs` 从 node_modules 生成），原描述正确。
+- 据此修正 `scripts/deploy.sh` 两处注释；CLAUDE.md 中「不进 git」属 v2.0 方案原文，以本条为准。
+
+### 仓库清理（已执行）
+
+- 排查 remote：仓库原从 `qwerasdq/project`（其 main 为另一记账项目，与本仓库无共同祖先）迁至
+  `qwerasdq/xqdk-web`；`main` 上游为 `xqdk/main`，线上 Worker `xqdk-web` 也跟此仓库
+  → 旧 `project` remote 属残留，已 `git remote remove project`（连带清掉
+  `branch.main.vscode-merge-base`；`project` 的代码 GitHub 上仍有，本地历史不受影响）。
+- 体积回收：`.git` 从 **324.2MB 降到 11.7MB**。原不可达 blob 共 2450 个 / 443.7MB（未压缩），
+  大头是早期「第一次commit」「第二次11」时期提交又删除的压缩包
+  （97MB zip、53MB 7z、50MB / 45.5MB / 44MB zstd、44MB zip），并非代码。
+  `git gc --prune=now` 后 `git count-objects` 只剩 1 pack / 211 对象、`garbage: 0`，`git fsck` 无输出。
+- 清理后复验：11 个提交历史完好；`public/engine/*`、`xq-yolo-640.onnx` 的 SHA256 与
+  `scripts/*.sha256` 仍逐条一致；103 单测 + `vue-tsc` + `vite build` 全绿。
+
+### 遗留 / 待办
+
+- [ ] 删除根目录垃圾文件 `ls`（0 字节，2026-10-06 生成）
+- [ ] 根目录未跟踪的 `diagnose_vision_*.png`、`prod_repro_*.png` 归档或删除；`AGENTS.md` 待定是否入库
+
 ## 2026-10-06 — 第 5 天：W6d WebGPU 设备丢失防护与后端自愈（收尾）
 
 ### 背景 / 续接
