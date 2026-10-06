@@ -46,15 +46,12 @@ async function feedNext(): Promise<void> {
   }
 }
 
-function start(): void {
-  if (running.value) return
-  running.value = true
-  keepAlive = true
-  status.value = 'loading'
-  push('初始化识别 worker…')
-  worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })
+function spawn(ep: 'auto' | 'wasm'): void {
+  const current = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })
+  worker = current
 
-  worker.onmessage = (e: MessageEvent) => {
+  current.onmessage = (e: MessageEvent) => {
+    if (current !== worker) return
     const m = e.data
     if (m.type === 'ready') {
       status.value = `ready (${m.ep})`
@@ -75,6 +72,14 @@ function start(): void {
         }
       }
     } else if (m.type === 'init-error') {
+      if (m.retryWithWasm && ep === 'auto' && running.value) {
+        current.terminate()
+        worker = null
+        status.value = 'loading'
+        push(`WebGPU 初始化失败，切换新 worker 到 WASM：${m.message}`)
+        spawn('wasm')
+        return
+      }
       status.value = `error: ${m.message}`
       push(`初始化失败：${m.stage} ${m.message}`)
       stop()
@@ -82,12 +87,22 @@ function start(): void {
       push(m.text)
     }
   }
-  worker.onerror = (e) => {
+  current.onerror = (e) => {
+    if (current !== worker) return
     status.value = `worker error: ${e.message}`
     push(`worker 异常：${e.message}`)
     stop()
   }
-  worker.postMessage({ type: 'init', modelUrl: MODEL_URL, ortDir: ORT_DIR, ep: 'auto' })
+  current.postMessage({ type: 'init', modelUrl: MODEL_URL, ortDir: ORT_DIR, ep })
+}
+
+function start(): void {
+  if (running.value) return
+  running.value = true
+  keepAlive = true
+  status.value = 'loading'
+  push('初始化识别 worker…')
+  spawn('auto')
 }
 
 function stop(): void {

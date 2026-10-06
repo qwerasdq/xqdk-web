@@ -45,7 +45,7 @@ export class InferenceTimeoutError extends Error {
 }
 
 /** 会话创建超时（设备异常，重试大概率同样卡死，不再重试） */
-class SessionInitTimeoutError extends Error {
+export class SessionInitTimeoutError extends Error {
   constructor(ep: Backend) {
     super(`创建 ${ep} 会话超时（${SESSION_TIMEOUT_MS}ms）`)
     this.name = 'SessionInitTimeoutError'
@@ -159,8 +159,9 @@ async function prepareSession(modelUrl: string, ep: Backend): Promise<ModelSessi
 }
 
 /**
- * 创建会话。prefer='auto' 时先试 WebGPU（失败重试一次后回退 WASM），prefer='webgpu' 时失败直接抛出。
- * 返回的会话已通过形状自检与预热——拿到即可用。
+ * 创建会话。prefer='auto' 时先试 WebGPU（失败重试一次后抛出，由上层换新 Worker 启动 WASM），
+ * prefer='webgpu' 时失败直接抛出。不能在同一 Worker 内回退 WASM：WebGPU 与 WASM 共享 ORT runtime，
+ * 前者初始化失败可能会把后者标记为 aborted。
  */
 export async function createSession(
   modelUrl: string,
@@ -183,9 +184,12 @@ export async function createSession(
     }
   }
 
-  const m = await prepareSession(modelUrl, 'wasm')
-  m.fallbackReason = lastErr instanceof Error ? lastErr.message : String(lastErr)
-  return m
+  // A timed-out WebGPU initialization may still be running inside ORT. Starting
+  // WASM in this realm can re-enter initWasm() and fail with "multiple calls".
+  // Let the caller terminate this worker and retry WASM in a fresh realm.
+  if (lastErr instanceof SessionInitTimeoutError) throw lastErr
+
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
 }
 
 /**

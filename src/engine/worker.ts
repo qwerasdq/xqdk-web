@@ -28,8 +28,8 @@ var activeSearchId = null
 var pendingGo = null
 
 function post(m) { self.postMessage(m) }
-self.onerror = function (e) { post({ type: 'log', text: 'worker error: ' + e.message }) }
-self.onunhandledrejection = function (e) { post({ type: 'log', text: 'worker unhandled: ' + e.reason }) }
+self.onerror = function (e) { post({ type: 'error', text: 'worker error: ' + (e && e.message ? e.message : e) }) }
+self.onunhandledrejection = function (e) { post({ type: 'error', text: 'worker unhandled: ' + (e && e.reason ? e.reason : e) }) }
 
 // UCI 命令串行队列：sendCommand 同步驱动引擎单轮 UCI 循环，
 // 若在 stdout 回调（onLine）里直接 sendCommand 会重入 wasm_uci_execute 导致引擎挂起。
@@ -136,7 +136,7 @@ self.onmessage = async function (e) {
       post({ type: 'log', text: '引擎实例创建完成，发 uci…' })
       engine.sendCommand('uci')
     } catch (err) {
-      post({ type: 'log', text: 'init 失败: ' + err })
+      post({ type: 'error', text: 'engine init failed: ' + err })
     }
     return
   }

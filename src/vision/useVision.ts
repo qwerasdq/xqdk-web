@@ -192,6 +192,7 @@ export function useVision(modelUrl: string, ortDir: string, handlers: VisionHand
           killWorker(old)
           state.backend = msg.ep
           state.lastError = ''
+          if (state.state !== 'awaiting-confirm') state.state = 'capturing'
           if (msg.ep === 'webgpu') {
             readyAt = Date.now()
             state.backendNotice = ''
@@ -235,17 +236,30 @@ export function useVision(modelUrl: string, ortDir: string, handlers: VisionHand
       case 'init-error': {
         if (from === pending) {
           const target = pendingTarget
+          const message = msg.message
           killWorker(pending)
           pending = null
           if (target === 'webgpu') {
-            state.backendNotice = `恢复 WebGPU 失败（${msg.message}），继续使用 WASM 后端`
+            state.backendNotice = `恢复 WebGPU 失败（${message}），继续使用 WASM 后端`
+          } else if (target === 'auto' && msg.retryWithWasm) {
+            // auto worker's WebGPU attempt may have poisoned ORT's shared WASM
+            // runtime; start WASM in a separate realm while keeping capture alive.
+            state.backendNotice = `恢复 WebGPU 失败（${message}），继续使用 WASM 后端`
+            pendingTarget = 'wasm'
+            pending = spawnWorker('wasm')
           } else {
             // WASM 兜底也失败：回到出错态
-            notifyError(`识别模型初始化失败：${msg.message}`)
+            stopCapture()
+            notifyError(`识别模型初始化失败：${message}`)
             terminateWorker()
           }
           break
         }
+        if (msg.retryWithWasm && epPreference === 'auto') {
+          replaceWithFallback(`WebGPU 初始化失败（${msg.message}）`)
+          break
+        }
+        stopCapture()
         notifyError(`识别模型初始化失败：${msg.message}`)
         terminateWorker()
         break
@@ -277,17 +291,19 @@ export function useVision(modelUrl: string, ortDir: string, handlers: VisionHand
       if (target === 'webgpu') {
         state.backendNotice = `恢复 WebGPU 失败（${e.message || 'worker 异常'}），继续使用 WASM 后端`
       } else {
+        stopCapture()
         notifyError(`识别 worker 异常：${e.message}`)
         terminateWorker()
       }
       return
     }
+    stopCapture()
     notifyError(`识别 worker 异常：${e.message}`)
     terminateWorker()
   }
 
-  function post(msg: ToVisionWorker): void {
-    if (worker) worker.postMessage(msg)
+  function post(msg: ToVisionWorker, transfer: Transferable[] = []): void {
+    if (worker) worker.postMessage(msg, transfer)
   }
 
   async function start(ep: 'auto' | Backend): Promise<void> {
@@ -312,7 +328,13 @@ export function useVision(modelUrl: string, ortDir: string, handlers: VisionHand
             return
           }
           const id = ++frameId
-          post({ type: 'frame', id, bitmap, frameW, frameH })
+          try {
+            // ImageBitmap 必须转移所有权，否则结构化克隆会失败，Worker 永远收不到画面。
+            post({ type: 'frame', id, bitmap, frameW, frameH }, [bitmap])
+          } catch (e) {
+            bitmap.close()
+            throw e
+          }
         },
         onEnded: () => {
           // 用户主动停止共享：结束捕获并回收 worker，避免重开时泄漏旧实例
@@ -339,6 +361,7 @@ export function useVision(modelUrl: string, ortDir: string, handlers: VisionHand
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       notifyError(`无法开始屏幕捕获：${message}`)
+      stopCapture()
       terminateWorker()
       throw e
     }

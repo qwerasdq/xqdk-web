@@ -221,6 +221,51 @@ describe('useVision', () => {
     expect(fallback.terminated).toBe(true)
   })
 
+  it('初始 auto WebGPU 初始化超时使用新 worker 切换 WASM', async () => {
+    const p = vision.start('auto')
+    const auto = lastWorker()
+    dispatch(auto, {
+      type: 'init-error',
+      stage: 'session',
+      message: '创建 webgpu 会话超时',
+      retryWithWasm: true,
+    })
+
+    const fallback = lastWorker()
+    expect(fallback).not.toBe(auto)
+    expect(auto.terminated).toBe(true)
+    expect(initEp(fallback)).toBe('wasm')
+    expect(vision.state.backendNotice).toContain('正在切换 WASM')
+
+    dispatch(fallback, { type: 'ready', ep: 'wasm', loadMs: 1 })
+    await p
+    expect(vision.state.state).toBe('capturing')
+    expect(vision.state.backend).toBe('wasm')
+  })
+
+  it('自动重连 WebGPU 初始化失败时：在保持 WASM 的同时切换新 WASM worker', async () => {
+    const { fallback } = await fallbackToWasm()
+    vi.advanceTimersByTime(1800)
+    const retry = lastWorker()
+    expect(initEp(retry)).toBe('auto')
+
+    dispatch(retry, {
+      type: 'init-error',
+      stage: 'session',
+      message: 'no available backend found',
+      retryWithWasm: true,
+    })
+    const replacement = lastWorker()
+    expect(replacement).not.toBe(retry)
+    expect(initEp(replacement)).toBe('wasm')
+    expect(vision.state.backend).toBe('wasm')
+    expect(vision.state.state).toBe('capturing')
+    expect(vision.state.backendNotice).toContain('继续使用 WASM')
+
+    dispatch(replacement, { type: 'ready', ep: 'wasm', loadMs: 1 })
+    expect(fallback.terminated).toBe(true)
+  })
+
   it('替换进行中 stop：主 worker 与 pending 一并回收，回到 idle', async () => {
     const main = await startCapturing()
     dispatch(main, { type: 'backend-lost', reason: '设备被重置' })

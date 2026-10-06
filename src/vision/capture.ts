@@ -29,7 +29,16 @@ export class ScreenCapture {
   ) {}
 
   static isSupported(): boolean {
-    return typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getDisplayMedia === 'function'
+    return ScreenCapture.unsupportedReason() === ''
+  }
+
+  static unsupportedReason(): string {
+    if (typeof navigator === 'undefined') return '当前环境不支持屏幕捕获'
+    const secure = (globalThis as { isSecureContext?: boolean }).isSecureContext
+    if (secure === false) return '屏幕捕获需要安全上下文，请使用 http://localhost:5173 或 HTTPS 地址'
+    if (!navigator.mediaDevices) return '当前浏览器未提供屏幕捕获 API'
+    if (typeof navigator.mediaDevices.getDisplayMedia !== 'function') return '当前浏览器不支持屏幕捕获（getDisplayMedia）'
+    return ''
   }
 
   get intervalMs(): number {
@@ -69,11 +78,20 @@ export class ScreenCapture {
 
   /** 请求授权并开始抽帧。用户取消授权时抛 NotFoundError/NotAllowedError（由调用方分类提示） */
   async start(): Promise<void> {
-    if (!ScreenCapture.isSupported()) throw new Error('当前浏览器不支持屏幕捕获（getDisplayMedia）')
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: 5 }, // 抽帧频率远低于此，限制帧率只为降低编码开销
-      audio: false,
-    })
+    const unsupported = ScreenCapture.unsupportedReason()
+    if (unsupported) throw new Error(unsupported)
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 5 }, // 抽帧频率远低于此，限制帧率只为降低编码开销
+        audio: false,
+      })
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'NotAllowedError') {
+        throw new Error('未选择屏幕或浏览器拒绝了共享，请重新点击并选择要识别的窗口或屏幕')
+      }
+      throw e
+    }
     this.stream = stream
 
     // 用户随时可能点浏览器的「停止共享」

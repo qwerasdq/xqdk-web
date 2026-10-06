@@ -29,8 +29,10 @@ const error = ref('')
 const lastInfo = shallowRef<EngineInfo | null>(null)
 
 let worker: Worker | null = null
+let workerUrl: string | null = null
 let readyResolved = false
-const readyWaiters: (() => void)[] = []
+type ReadyWaiter = { resolve: () => void; reject: (error: Error) => void }
+const readyWaiters: ReadyWaiter[] = []
 // info 订阅（带搜索 id，用于分析器按 id 过滤）
 const infoListeners = new Set<(id: number, i: EngineInfo) => void>()
 
@@ -38,23 +40,65 @@ let searchSeq = 0
 const pendingSearches = new Map<number, (r: BestmoveResult) => void>()
 
 const SEARCH_TIMEOUT_MS = 30_000
+const ENGINE_INIT_TIMEOUT_MS = 30_000
+let initTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearInitTimer(): void {
+  if (initTimer !== null) {
+    clearTimeout(initTimer)
+    initTimer = null
+  }
+}
+
+function disposeWorker(): void {
+  clearInitTimer()
+  if (worker) {
+    worker.onmessage = null
+    worker.onerror = null
+    worker.onmessageerror = null
+    worker.terminate()
+    worker = null
+  }
+  if (workerUrl) {
+    URL.revokeObjectURL(workerUrl)
+    workerUrl = null
+  }
+}
+
+function failEngine(message: string): void {
+  const detail = message || 'engine initialization failed'
+  status.value = 'error'
+  error.value = detail
+  readyResolved = false
+  const failure = new Error(detail)
+  for (const waiter of readyWaiters) waiter.reject(failure)
+  readyWaiters.length = 0
+  disposeWorker()
+}
 
 function onWorkerMessage(e: MessageEvent): void {
   const msg = e.data as
     | { type: 'ready'; engineId: string; engineName: string }
     | { type: 'info'; id: number; text: string }
     | { type: 'bestmove'; id: number; text: string }
+    | { type: 'error'; text: string }
     | { type: 'log'; text: string }
 
   if (msg.type === 'ready') {
+    clearInitTimer()
     readyResolved = true
     engineName.value = msg.engineName
     status.value = 'ready'
-    for (const w of readyWaiters) w()
+    for (const waiter of readyWaiters) waiter.resolve()
     readyWaiters.length = 0
     // 预热引擎缓存（PWA 离线）：首次加载时 SW 尚未控制页面，引擎文件的 XHR
     // 未被 runtimeCaching 拦截；主动写入与 workbox 相同的 cacheName
     void warmEngineCache()
+    return
+  }
+
+  if (msg.type === 'error') {
+    failEngine(msg.text)
     return
   }
 
@@ -98,7 +142,10 @@ async function warmEngineCache(): Promise<void> {
 
 async function waitReady(): Promise<void> {
   if (readyResolved) return
-  await new Promise<void>((resolve) => readyWaiters.push(resolve))
+  if (status.value === 'error') {
+    throw new Error(error.value || 'engine initialization failed')
+  }
+  await new Promise<void>((resolve, reject) => readyWaiters.push({ resolve, reject }))
 }
 
 // MultiPV 通过 setoption 设置（pikafish/Stockfish 不支持 go multipv 参数）。
@@ -115,15 +162,21 @@ export function initEngine(): void {
   if (worker) return
   status.value = 'loading'
   error.value = ''
+  readyResolved = false
+  const isolated = (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true
+  if (typeof SharedArrayBuffer === 'undefined' || !isolated) {
+    failEngine('engine requires a secure, cross-origin-isolated page; open http://localhost:5173 or use HTTPS')
+    return
+  }
   // Blob classic worker：社区 pikafish.js 构建仅在裸 classic worker 中工作正常
   // （vite 打包 worker 在 dev/build 下均静默失效，见 worker.ts 头注释）
   const blobUrl = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }))
+  workerUrl = blobUrl
   worker = new Worker(blobUrl)
   worker.onmessage = onWorkerMessage
-  worker.onerror = (e) => {
-    error.value = e.message || 'Worker 错误'
-    status.value = 'error'
-  }
+  worker.onerror = (e) => failEngine(e.message || 'engine worker error')
+  worker.onmessageerror = () => failEngine('engine worker message error')
+  initTimer = setTimeout(() => failEngine('engine initialization timed out'), ENGINE_INIT_TIMEOUT_MS)
   worker.postMessage({ type: 'init', engineDir: ENGINE_DIR })
 }
 

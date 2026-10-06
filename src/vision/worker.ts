@@ -27,6 +27,7 @@ const CONFIRM_FRAMES = 3
 let model: ModelSession | null = null
 let busy = false
 let disposed = false
+let initStarted = false
 const tracker = new BoardTracker(CONFIRM_FRAMES)
 
 function post(msg: FromVisionWorker): void {
@@ -81,13 +82,22 @@ function onDeviceLost(reason: string): void {
 }
 
 async function handleInit(msg: Extract<ToVisionWorker, { type: 'init' }>): Promise<void> {
+  if (initStarted || disposed) return
+  initStarted = true
   const t0 = performance.now()
   disposed = false
   try {
     model = await createSession(msg.modelUrl, msg.ortDir, msg.ep)
   } catch (e) {
     model = null
-    post({ type: 'init-error', stage: 'session', message: e instanceof Error ? e.message : String(e) })
+    post({
+      type: 'init-error',
+      stage: 'session',
+      message: e instanceof Error ? e.message : String(e),
+      // WebGPU and WASM share ORT's runtime state. Any auto WebGPU init failure
+      // must be retried in a fresh worker before starting WASM.
+      retryWithWasm: msg.ep === 'auto',
+    })
     return
   }
   post({ type: 'ready', ep: model.ep, loadMs: Math.round(performance.now() - t0), fallbackReason: model.fallbackReason })

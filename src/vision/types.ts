@@ -91,7 +91,7 @@ export type ToVisionWorker =
 
 export type FromVisionWorker =
   | { type: 'ready'; ep: 'webgpu' | 'wasm'; loadMs: number; fallbackReason?: string }
-  | { type: 'init-error'; stage: 'fetch' | 'session' | 'ep'; message: string }
+  | { type: 'init-error'; stage: 'fetch' | 'session' | 'ep'; message: string; retryWithWasm?: boolean }
   /** 运行期后端失效（WebGPU 设备丢失/挂起）：需主线程替换 worker 恢复 */
   | { type: 'backend-lost'; reason: string }
   | {
