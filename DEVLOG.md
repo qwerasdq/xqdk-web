@@ -2,6 +2,47 @@
 
 Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v2.0）。
 
+## 2026-10-06 — 修复「无法开始屏幕捕获：reading attachPreview」
+
+### 背景
+
+- 症状：点「开始捕获」后报 `无法开始屏幕捕获：Cannot read properties of null (reading 'attachPreview')`，
+  真实失败原因被这条消息覆盖，无从排查。
+
+### 根因
+
+- `useVision.start()` 中 `capture = new ScreenCapture(...)` → `await capture.start()`（内部 `getDisplayMedia`
+  等用户选窗口，可达数秒）→ 恢复执行后再读模块级 `capture`。
+- 授权期间识别 worker 若初始化失败（`init-error` / worker 异常），会经 `stopCapture()` 把 `capture` 置空；
+  于是 `await` 恢复后 `capture.attachPreview(...)` 抛 TypeError，又被本函数的 catch 包装成
+  「无法开始屏幕捕获：…」，把 worker 报出的真实错误（如模型加载失败）冲掉。
+- 次生问题：`ScreenCapture.stop()` 若发生在 `getDisplayMedia` 授权完成前是空操作，授权完成后媒体流仍会
+  启动且无人回收（屏幕流泄漏 + 持续抽帧）。
+
+### 本次交付
+
+| 文件 | 说明 |
+|---|---|
+| src/vision/useVision.ts | 改用局部 `const cap` 持有本次实例；`await` 后校验 `capture === cap`，已被回收则放弃接线并补一次 `cap.stop()`；catch 仅在仍持有该实例时才 `notifyError`，保留 worker 的真实错误 |
+| src/vision/capture.ts | 新增 `stopped` 标志：`stop()` 在授权/播放期间被调用时，`start()` 拿到流后立即释放并返回，不进入抽帧 |
+| src/vision/useVision.test.ts | 新增回归测试：mock 支持「start 挂起（模拟等待授权）」，授权期间派发 `init-error`，断言不崩溃、真实错误不被覆盖、`attachPreview` 未被调用、流被回收 |
+
+### 验证
+
+- 104 个单测全过（新增 1 个）；`vue-tsc` + `npm run build` 全绿。
+- 该回归测试在修复前必然失败（旧代码抛 TypeError 并覆盖 `lastError`）。
+
+### 遗留 / 待办
+
+- [ ] 若真实失败原因是模型/ORT 加载：新代码已能显示真实 message，按提示继续排查（本次只修了错误被掩盖的问题）
+
+### 2026-10-07 复查
+
+- 用户再次报同一报错。核对 `git HEAD`（f9425e9）：仍是旧的 `capture.attachPreview(...)` 写法，
+  修复只存在于工作区未提交 → 线上构建（Workers Builds 走 git）与其他 clone 依旧复现。
+- 本地 dev（Vite）+ 真实 Chromium（headless + 自动选屏）点「开始捕获」正常进入「识别中（wasm）」、无报错；
+  故该报错只能来自旧 bundle（PWA service worker precache 的旧 hash js，或未提交的线上构建）。
+
 ## 2026-10-06 — 仓库体检与二进制资产 git 策略对齐
 
 ### 背景

@@ -320,51 +320,68 @@ export function useVision(modelUrl: string, ortDir: string, handlers: VisionHand
 
     worker = spawnWorker(ep)
 
+    // 用局部 const 持有本次实例：await 期间 worker 初始化失败会 stopCapture() 把
+    // 模块级 capture 置空，恢复执行后不能再读它（否则报 reading attachPreview）。
+    const cap = new ScreenCapture({
+      onFrame: (bitmap, frameW, frameH) => {
+        if (!worker) {
+          bitmap.close()
+          return
+        }
+        const id = ++frameId
+        try {
+          // ImageBitmap 必须转移所有权，否则结构化克隆会失败，Worker 永远收不到画面。
+          post({ type: 'frame', id, bitmap, frameW, frameH }, [bitmap])
+        } catch (e) {
+          bitmap.close()
+          throw e
+        }
+      },
+      onEnded: () => {
+        // 用户主动停止共享：结束捕获并回收 worker，避免重开时泄漏旧实例
+        stopCapture()
+        terminateWorker()
+        state.state = 'idle'
+        state.backend = null
+        state.backendNotice = ''
+        state.sourceInfo = null
+        state.started = false
+        state.unstableStreak = 0
+        state.lastFrameDiag = null
+      },
+      onError: (message) => notifyError(message),
+  })
+    capture = cap
+
     try {
-      capture = new ScreenCapture({
-        onFrame: (bitmap, frameW, frameH) => {
-          if (!worker) {
-            bitmap.close()
-            return
-          }
-          const id = ++frameId
-          try {
-            // ImageBitmap 必须转移所有权，否则结构化克隆会失败，Worker 永远收不到画面。
-            post({ type: 'frame', id, bitmap, frameW, frameH }, [bitmap])
-          } catch (e) {
-            bitmap.close()
-            throw e
-          }
-        },
-        onEnded: () => {
-          // 用户主动停止共享：结束捕获并回收 worker，避免重开时泄漏旧实例
-          stopCapture()
-          terminateWorker()
-          state.state = 'idle'
-          state.backend = null
-          state.backendNotice = ''
-          state.sourceInfo = null
-          state.started = false
-          state.unstableStreak = 0
-          state.lastFrameDiag = null
-        },
-        onError: (message) => notifyError(message),
-      })
-      await capture.start()
-      capture.attachPreview(previewCanvas.current)
-      state.sourceInfo = capture.sourceInfo
-        ? {
-            label: capture.sourceInfo.label,
-            displaySurface: (capture.sourceInfo.displaySurface as 'monitor' | 'window' | 'browser' | 'unknown') || 'unknown',
-          }
-        : null
+      await cap.start()
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      notifyError(`无法开始屏幕捕获：${message}`)
-      stopCapture()
-      terminateWorker()
+      // 已被 worker 失败路径回收时，保留它的真实错误，不要用本处异常覆盖
+      if (capture === cap) {
+        notifyError(`无法开始屏幕捕获：${message}`)
+        stopCapture()
+        terminateWorker()
+      }
       throw e
     }
+
+    // 授权期间识别 worker 可能已失败并回收（init-error / worker 异常 → stopCapture）：
+    // 放弃接线；并补一次 stop —— 若 stop() 发生在授权完成前，ScreenCapture 内部的清理
+    // 是空操作，需在此确保刚拿到的媒体流被释放。
+    if (capture !== cap) {
+      cap.stop()
+      return
+    }
+
+    cap.attachPreview(previewCanvas.current)
+    const info = cap.sourceInfo
+    state.sourceInfo = info
+      ? {
+          label: info.label,
+          displaySurface: (info.displaySurface as 'monitor' | 'window' | 'browser' | 'unknown') || 'unknown',
+        }
+      : null
   }
 
   function stop(): void {

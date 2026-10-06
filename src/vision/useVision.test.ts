@@ -15,7 +15,10 @@ interface FakeWorker {
 
 const box = vi.hoisted(() => ({
   workers: [] as FakeWorker[],
-  captures: [] as { started: boolean }[],
+  captures: [] as { started: boolean; attachCalls: number }[],
+  /** 模拟 getDisplayMedia 等待用户授权：start() 挂起，期间可派发 worker 消息 */
+  holdStart: false,
+  releaseStart: null as null | (() => void),
 }))
 
 class FakeWorkerImpl implements FakeWorker {
@@ -37,16 +40,24 @@ class FakeWorkerImpl implements FakeWorker {
 vi.mock('./capture', () => ({
   ScreenCapture: class {
     started = false
+    attachCalls = 0
     constructor() {
       box.captures.push(this)
     }
     async start(): Promise<void> {
+      if (box.holdStart) {
+        await new Promise<void>((resolve) => {
+          box.releaseStart = resolve
+        })
+      }
       this.started = true
     }
     stop(): void {
       this.started = false
     }
-    attachPreview(): void {}
+    attachPreview(): void {
+      this.attachCalls++
+    }
     get sourceInfo() {
       return { label: '测试窗口', displaySurface: 'window' }
     }
@@ -103,6 +114,8 @@ beforeEach(() => {
   vi.stubGlobal('Worker', FakeWorkerImpl)
   box.workers.length = 0
   box.captures.length = 0
+  box.holdStart = false
+  box.releaseStart = null
   vision = useVision('/models/x', '/ort/')
 })
 
@@ -219,6 +232,29 @@ describe('useVision', () => {
     expect(vision.state.state).toBe('error')
     expect(vision.state.lastError).toContain('wasm 会话创建失败')
     expect(fallback.terminated).toBe(true)
+  })
+
+  it('授权期间 worker 初始化失败：保留真实错误、不崩溃、回收已拿到的流', async () => {
+    box.holdStart = true
+    const p = vision.start('auto')
+    const auto = lastWorker()
+
+    // 用户还在选窗口，worker 硬失败（无 WASM 重试）→ 进入 error 并回收 capture
+    dispatch(auto, { type: 'init-error', stage: 'session', message: '模型加载失败 404' })
+    expect(vision.state.state).toBe('error')
+    expect(vision.state.lastError).toBe('识别模型初始化失败：模型加载失败 404')
+    expect(box.captures[0]?.started).toBe(false)
+
+    // 授权完成：start() 恢复执行，不得读取已被置空的 capture，也不得覆盖真实错误
+    box.holdStart = false
+    box.releaseStart?.()
+    await p
+
+    expect(vision.state.state).toBe('error')
+    expect(vision.state.lastError).toBe('识别模型初始化失败：模型加载失败 404')
+    expect(vision.state.sourceInfo).toBeNull()
+    expect(box.captures[0]?.attachCalls).toBe(0)
+    expect(box.captures[0]?.started).toBe(false)
   })
 
   it('初始 auto WebGPU 初始化超时使用新 worker 切换 WASM', async () => {

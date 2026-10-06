@@ -21,6 +21,8 @@ export class ScreenCapture {
   private video: HTMLVideoElement | null = null
   private timer: number | null = null
   private active = false
+  /** 已被 stop() 回收：用于中断仍在授权/播放中的 start()，避免拿到流后无人回收 */
+  private stopped = false
   private preview: HTMLCanvasElement | null = null
 
   constructor(
@@ -80,6 +82,7 @@ export class ScreenCapture {
   async start(): Promise<void> {
     const unsupported = ScreenCapture.unsupportedReason()
     if (unsupported) throw new Error(unsupported)
+    this.stopped = false
     let stream: MediaStream
     try {
       stream = await navigator.mediaDevices.getDisplayMedia({
@@ -91,6 +94,11 @@ export class ScreenCapture {
         throw new Error('未选择屏幕或浏览器拒绝了共享，请重新点击并选择要识别的窗口或屏幕')
       }
       throw e
+    }
+    if (this.stopped) {
+      // 授权期间调用方已放弃（如识别 worker 初始化失败）：立即释放流，不进入抽帧
+      for (const track of stream.getTracks()) track.stop()
+      return
     }
     this.stream = stream
 
@@ -117,10 +125,15 @@ export class ScreenCapture {
     }
 
     this.active = true
+    if (this.stopped) {
+      this.stop()
+      return
+    }
     this.schedule()
   }
 
   stop(): void {
+    this.stopped = true
     this.active = false
     if (this.timer !== null) {
       clearTimeout(this.timer)
