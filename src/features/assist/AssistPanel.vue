@@ -7,7 +7,7 @@ import AnalysisPanel from '../../components/analysis/AnalysisPanel.vue'
 import type { AnalysisLine } from '../../engine/useEngine'
 import type { Backend, VisionSourceInfo, VisionState } from '../../vision/useVision'
 import type { AssistPlan } from './plans'
-import VisionControl, { type PendingSyncSnapshot } from './VisionControl.vue'
+import VisionControl, { type FrameDiag, type PendingSyncSnapshot } from './VisionControl.vue'
 
 const props = defineProps<{
   fen: string
@@ -29,6 +29,8 @@ const props = defineProps<{
   visionStarted: boolean
   visionSourceInfo: VisionSourceInfo | null
   visionPendingSync: PendingSyncSnapshot | null
+  visionFrameDiag: FrameDiag | null
+  visionBackendNotice: string
 }>()
 
 const emit = defineEmits<{
@@ -39,6 +41,8 @@ const emit = defineEmits<{
   (e: 'vision-stop'): void
   (e: 'vision-confirm-pending'): void
   (e: 'vision-discard-pending'): void
+  (e: 'vision-preview-ready', canvas: HTMLCanvasElement | null): void
+  (e: 'vision-reconnect'): void
 }>()
 
 const myTurn = computed(() => (props.redGo ? 'red' : 'black') === props.mySide)
@@ -60,10 +64,14 @@ const myTurn = computed(() => (props.redGo ? 'red' : 'black') === props.mySide)
       :started="visionStarted"
       :source-info="visionSourceInfo"
       :pending-sync="visionPendingSync"
+      :last-frame-diag="visionFrameDiag"
+      :backend-notice="visionBackendNotice"
       @start="emit('vision-start')"
       @stop="emit('vision-stop')"
       @confirm-pending="emit('vision-confirm-pending')"
       @discard-pending="emit('vision-discard-pending')"
+      @preview-ready="(c) => emit('vision-preview-ready', c)"
+      @reconnect="emit('vision-reconnect')"
     />
 
     <div class="row">

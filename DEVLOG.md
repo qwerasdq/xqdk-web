@@ -2,6 +2,74 @@
 
 Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v2.0）。
 
+## 2026-10-06 — 第 5 天：W6d WebGPU 设备丢失防护与后端自愈（收尾）
+
+### 背景 / 续接
+
+- W6d 排查结论：ORT 1.22 在 WebGPU 设备丢失（驱动重置/多显卡切换/远程桌面/休眠唤醒）后，
+  `session.run()` 不 reject 而是**永久挂起**（本机实测）——try/catch 无法恢复；
+  且同 worker realm 内挂起的 run 使 release 失效，新会话报 `Session already started`，恢复只能换 worker（新 realm）。
+- 上一会话完成防护代码与浏览器实测（截图 `w6d_deviceloss.png` 归档），本会话收尾：
+  补恢复状态机单元测试、清理死代码（未使用的 `FALLBACK_DELAY_MS`）、补本条目。
+
+### 本次交付
+
+| 文件 | 说明 |
+|---|---|
+| src/vision/model.ts | 三层防护：①会话创建 + 预热（首次 WebGPU 推理含着色器编译，前移并验证后端真实可用；瞬时适配器失败重试一次）②`watchDeviceLoss` 监听设备丢失 ③推理超时（`run()` 挂起超 5s 抛 `InferenceTimeoutError`）；会话创建 15s 超时防卡在加载中 |
+| src/vision/worker.ts | 设备丢失/推理超时上报 `backend-lost` 并拒绝后续帧（不尝试同 realm 重建，交由主线程换 worker） |
+| src/vision/useVision.ts | 恢复状态机：`backend-lost` → 先建 WASM 兜底 worker 保持识别不中断 → 自动重连 WebGPU（上限 2 次，稳定 60s 重置配额）→ 转手动「重连 WebGPU」；`backendNotice` 全程提示 |
+| src/vision/types.ts | `FromVisionWorker` 增加 `backend-lost` |
+| src/features/assist/VisionControl.vue | 降级提示条 + 「重连 WebGPU」按钮（WASM 后端且未在加载时可用） |
+| src/vision/model.test.ts（新） | `withTimeout` / `runModel` 超时与输出拷贝测试（6 个） |
+| src/vision/useVision.test.ts | 恢复状态机测试（mock Worker + ScreenCapture + fake timers，11 个） |
+
+### 验证
+
+- 101 个单元测试全过（新增 10 个 useVision 状态机测试）；vue-tsc + `npm run build` 全绿
+- 恢复链路全路径有测试：设备丢失→兜底替换→自动重连成功/失败→配额耗尽转手动→手动重连→init-error→替换中 stop 回收
+- 上一会话浏览器实测截图 `w6d_deviceloss.png` 已归档
+
+### 遗留 / 待办
+
+- [ ] 真实设备丢失场景人工验证（驱动重置/远程桌面切换，观察自动降级与恢复提示是否按预期出现）
+- [ ] W6c 真实 JJ 窗口人工验证（预览缩略图确认来源 → 走子 → 观察同步/待确认/丢弃）
+- [ ] 移动端布局、音效、开局库（可选增强）
+
+## 2026-10-04 — 第 3 天（续）：W6c 捕获预览缩略图 + 逐帧诊断
+
+### 背景 / 续接
+
+- 真实 JJ 窗口人工验证中发现两个问题：
+  1. **来源无法辨认**：Chrome 对 `getDisplayMedia` 的 `track.label` 只给设备 id
+     （实测显示 `window:921264:0`），不暴露窗口标题——「窗口名摘要」方案在 Chrome 上不成立；
+  2. **「不稳定」不透明**：连续 15+ 帧未确认时只有「· 不稳定」提示，
+     不知道是没检测到棋盘、棋子太少还是校验失败，无法自助排查。
+
+### 本次交付
+
+| 文件 | 说明 |
+|---|---|
+| src/vision/capture.ts | `attachPreview(canvas)` + 每次抽帧同步绘制 240px 宽缩略图到主线程画布；stop 时清空 |
+| src/vision/useVision.ts | 状态增加 `lastFrameDiag`（识别子数/校验问题/候选帧数/抽帧尺寸）；`attachPreview` 支持后挂画布（start 前未挂也能补挂） |
+| src/vision/worker.ts + types.ts | `frame-result` 增加诊断字段：`pieceCount`、`issues`、`candidateFrames`、`frameW/H` |
+| src/vision/boardTracker.ts | 暴露 `candidateFrames` getter（候选局面连续帧数） |
+| src/features/assist/VisionControl.vue | 捕获中显示**预览缩略图**（人工确认来源窗口）；诊断行显示「识别到 N 子 · 稳定 x/3 帧」或「校验失败：<原因>」 |
+| src/App.vue / AssistPanel.vue | 透传 `lastFrameDiag` 与预览画布挂载事件 |
+
+### 验证
+
+- vue-tsc + `npm run build` 全绿；85 个单元测试全过
+- **Chrome fake 捕获源实测**（Playwright `--auto-select-desktop-capture-source`）：
+  预览画布 240x135 正常绘制、诊断显示「检测 0 框 · 校验失败：未识别到棋盘」（fake 源无棋盘，符合预期）、
+  无控制台错误（截图 `w6c_vision_diag.png`）
+- 真实 JJ 窗口验证仍需人工：现在可直接通过缩略图确认捕获源是否正确
+
+### 遗留 / 待办
+
+- [ ] W6c 真实 JJ 窗口人工验证（预览缩略图确认来源 → 走子 → 观察同步/待确认/丢弃）
+- [ ] 移动端布局、音效、开局库（可选增强）
+
 ## 2026-10-04 — 第 3 天（续）：W6c 人工验证支持 + 防误同步 + 复盘增强
 
 ### 背景 / 续接

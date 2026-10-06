@@ -6,13 +6,17 @@
 // 交回主线程，由 sync.ts 与 Game 调和。
 //
 // Vite module worker（ORT 是 ESM 包；引擎那个 Blob classic worker 是 pikafish 专属处理，不复制）
+//
+// 后端稳定性（W6d）：WebGPU 设备丢失（驱动重置/远程桌面/休眠唤醒）后 ORT 的 run() 会永久挂起，
+// 且同 realm 内无法安全重建任何会话（挂起的 run 使 release 失效，新会话报 Session already started）。
+// 因此设备丢失/超时只上报主线程，由主线程替换 worker 完成恢复（先 WASM、再尝试 WebGPU）。
 
 declare const self: DedicatedWorkerGlobalScope
 
 import { validate } from './assistBoard'
 import { BoardTracker } from './boardTracker'
 import { map } from './boardMapper'
-import { createSession, runModel, type ModelSession } from './model'
+import { createSession, InferenceTimeoutError, runModel, watchDeviceLoss, type ModelSession } from './model'
 import { decode } from './postprocess'
 import { preprocess } from './preprocess'
 import type { FromVisionWorker, MappedBoard, RecognitionResult, ToVisionWorker } from './types'
@@ -22,6 +26,7 @@ const CONFIRM_FRAMES = 3
 
 let model: ModelSession | null = null
 let busy = false
+let disposed = false
 const tracker = new BoardTracker(CONFIRM_FRAMES)
 
 function post(msg: FromVisionWorker): void {
@@ -59,8 +64,25 @@ function toRecognition(mapped: MappedBoard): RecognitionResult {
   }
 }
 
+/**
+ * WebGPU 设备丢失或挂起：上报主线程替换 worker 恢复。
+ * 旧会话交给 worker 终止时的自动回收，不再尝试同 realm 重建。
+ */
+function notifyBackendLost(reason: string): void {
+  if (disposed) return
+  post({ type: 'backend-lost', reason })
+  // 上报后本 worker 已不可信：拒绝后续帧，避免挂起 run 长期占用
+  model = null
+}
+
+function onDeviceLost(reason: string): void {
+  if (disposed || model?.ep !== 'webgpu') return
+  notifyBackendLost(`WebGPU 设备丢失：${reason}`)
+}
+
 async function handleInit(msg: Extract<ToVisionWorker, { type: 'init' }>): Promise<void> {
   const t0 = performance.now()
+  disposed = false
   try {
     model = await createSession(msg.modelUrl, msg.ortDir, msg.ep)
   } catch (e) {
@@ -68,21 +90,22 @@ async function handleInit(msg: Extract<ToVisionWorker, { type: 'init' }>): Promi
     post({ type: 'init-error', stage: 'session', message: e instanceof Error ? e.message : String(e) })
     return
   }
-  post({ type: 'ready', ep: model.ep, loadMs: Math.round(performance.now() - t0) })
+  post({ type: 'ready', ep: model.ep, loadMs: Math.round(performance.now() - t0), fallbackReason: model.fallbackReason })
   send(`识别后端 ${model.ep}，输出行数 ${model.rows}`)
+  await watchDeviceLoss(model, onDeviceLost)
 }
 
 async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Promise<void> {
   const { id, bitmap, frameW, frameH } = msg
   if (model === null) {
     bitmap.close()
-    post({ type: 'frame-result', id, error: '模型未加载', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, timings: { pre: 0, infer: 0, post: 0 } })
+    post({ type: 'frame-result', id, error: '模型未加载', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, timings: { pre: 0, infer: 0, post: 0 } })
     return
   }
   if (busy) {
     // 上一帧还在推理：丢弃本帧（主线程按节流发送，堆积说明推理慢于抽帧）
     bitmap.close()
-    post({ type: 'frame-result', id, error: 'busy', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, timings: { pre: 0, infer: 0, post: 0 } })
+    post({ type: 'frame-result', id, error: 'busy', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, timings: { pre: 0, infer: 0, post: 0 } })
     return
   }
   busy = true
@@ -106,6 +129,7 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     result = mapped === null ? invalidResult('未识别到棋盘', detCount) : toRecognition(mapped)
   } catch (e) {
     result = invalidResult(e instanceof Error ? e.message : String(e), detCount)
+    if (e instanceof InferenceTimeoutError && model?.ep === 'webgpu') notifyBackendLost(e.message)
   } finally {
     bitmap.close()
     busy = false
@@ -123,6 +147,11 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     movedSide,
     redGo: tracker.redGo,
     unstableStreak: tracker.unstableStreak,
+    pieceCount: mapped ? mapped.pieceCount : null,
+    issues: result.issues,
+    candidateFrames: tracker.candidateFrames,
+    frameW,
+    frameH,
     timings: t,
   })
 }
@@ -144,6 +173,7 @@ self.onmessage = (e: MessageEvent<ToVisionWorker>): void => {
       tracker.ackDecision(msg.decision, msg.canonical)
       break
     case 'dispose':
+      disposed = true
       void model?.session.release()
       model = null
       tracker.reset()

@@ -90,8 +90,10 @@ export type ToVisionWorker =
   | { type: 'dispose' }
 
 export type FromVisionWorker =
-  | { type: 'ready'; ep: 'webgpu' | 'wasm'; loadMs: number }
+  | { type: 'ready'; ep: 'webgpu' | 'wasm'; loadMs: number; fallbackReason?: string }
   | { type: 'init-error'; stage: 'fetch' | 'session' | 'ep'; message: string }
+  /** 运行期后端失效（WebGPU 设备丢失/挂起）：需主线程替换 worker 恢复 */
+  | { type: 'backend-lost'; reason: string }
   | {
       type: 'frame-result'
       id: number
@@ -103,6 +105,15 @@ export type FromVisionWorker =
       /** tracker 推断的当前行棋方（协同步 / UI 显示用，权威以 Game 为准） */
       redGo: boolean
       unstableStreak: number
+      /** 诊断用：本帧识别棋子数（未映射时为 null） */
+      pieceCount: number | null
+      /** 诊断用：校验问题列表（空 = 通过） */
+      issues: string[]
+      /** 诊断用：候选局面连续帧数（>= 确认帧数即确认新局） */
+      candidateFrames: number
+      /** 诊断用：抽帧尺寸 */
+      frameW: number
+      frameH: number
       timings: { pre: number; infer: number; post: number }
     }
   | { type: 'log'; text: string }

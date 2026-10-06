@@ -18,6 +18,11 @@ export class BoardTracker {
   private candidate: RecognitionResult | null = null
   private candidateHits = 0
 
+  /** 候选局面已连续出现的帧数（诊断用：判断是否在收敛） */
+  get candidateFrames(): number {
+    return this.candidateHits
+  }
+
   /** 最近一次“确认新局”后，主线程返回的处理结果 */
   private ackedApplied: Uint8Array | null = null
   private ackedDiscarded: Uint8Array | null = null

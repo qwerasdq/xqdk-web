@@ -608,6 +608,8 @@ function switchMode(m: Mode): void {
           :vision-started="vision.state.started"
           :vision-source-info="vision.state.sourceInfo"
           :vision-pending-sync="visionPendingSnapshot"
+          :vision-frame-diag="vision.state.lastFrameDiag"
+          :vision-backend-notice="vision.state.backendNotice"
           @update:my-side="onMySideChange"
           @select-candidate="(u) => (selectedUcci = u)"
           @select-plan="(i) => (selectedPlan = i)"
@@ -615,6 +617,8 @@ function switchMode(m: Mode): void {
           @vision-stop="onVisionStop"
           @vision-confirm-pending="confirmPendingVision"
           @vision-discard-pending="discardPendingVision"
+          @vision-preview-ready="vision.attachPreview"
+          @vision-reconnect="vision.reconnectWebGpu"
         />
 
         <div class="controls" v-if="!isReview">

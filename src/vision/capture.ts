@@ -21,6 +21,7 @@ export class ScreenCapture {
   private video: HTMLVideoElement | null = null
   private timer: number | null = null
   private active = false
+  private preview: HTMLCanvasElement | null = null
 
   constructor(
     private readonly handlers: CaptureHandlers,
@@ -46,6 +47,24 @@ export class ScreenCapture {
     const label = track.label || '未知来源'
     const surface = (settings.displaySurface as string) || 'unknown'
     return { label, displaySurface: surface }
+  }
+
+  /** 挂载预览画布（Chrome 不暴露窗口标题，缩略图是人工确认来源的唯一可靠手段） */
+  attachPreview(canvas: HTMLCanvasElement | null): void {
+    this.preview = canvas
+  }
+
+  private drawPreview(): void {
+    const c = this.preview
+    const v = this.video
+    if (!c || !v || v.videoWidth === 0) return
+    const W = 240
+    const H = Math.max(1, Math.round((W * v.videoHeight) / v.videoWidth))
+    if (c.width !== W || c.height !== H) {
+      c.width = W
+      c.height = H
+    }
+    c.getContext('2d')?.drawImage(v, 0, 0, W, H)
   }
 
   /** 请求授权并开始抽帧。用户取消授权时抛 NotFoundError/NotAllowedError（由调用方分类提示） */
@@ -98,6 +117,9 @@ export class ScreenCapture {
       for (const track of this.stream.getTracks()) track.stop()
       this.stream = null
     }
+    if (this.preview !== null) {
+      this.preview.getContext('2d')?.clearRect(0, 0, this.preview.width, this.preview.height)
+    }
   }
 
   private schedule(): void {
@@ -119,6 +141,7 @@ export class ScreenCapture {
     }
     const video = this.video
     if (video !== null && video.readyState >= 2 && video.videoWidth > 0) {
+      this.drawPreview()
       try {
         const bitmap = await createImageBitmap(video)
         this.handlers.onFrame(bitmap, video.videoWidth, video.videoHeight)
