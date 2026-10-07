@@ -46,7 +46,7 @@ async function feedNext(): Promise<void> {
   }
 }
 
-function spawn(ep: 'auto' | 'wasm'): void {
+function spawn(): void {
   const current = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })
   worker = current
 
@@ -54,15 +54,16 @@ function spawn(ep: 'auto' | 'wasm'): void {
     if (current !== worker) return
     const m = e.data
     if (m.type === 'ready') {
-      status.value = `ready (${m.ep})`
-      push(`模型就绪：${m.ep}，加载 ${m.loadMs}ms`)
+      status.value = `ready (wasm)`
+      push(`模型就绪：wasm，加载 ${m.loadMs}ms`)
       void feedNext()
     } else if (m.type === 'frame-result') {
       if (m.error) {
         push(`帧 ${m.id} 错误：${m.error}`)
       } else {
         const short = m.event === 'UNSTABLE' ? '' : ` → ${m.event}（棋子 ${m.mapped?.pieceCount ?? '?'}）`
-        push(`帧 ${m.id}：检测 ${m.detections}${short}`)
+        const t = m.timings as { pre: number; infer: number; post: number }
+        push(`帧 ${m.id}：检测 ${m.detections}${short} [预处理 ${t.pre.toFixed(1)} / 推理 ${t.infer.toFixed(1)} / 后处理 ${t.post.toFixed(1)} ms]`)
         if (m.mapped) {
           resultJson.value = JSON.stringify(
             { event: m.event, pieces: m.mapped.pieceCount, avg: +m.mapped.avgScore.toFixed(3), dropped: m.mapped.dropped, orientation: m.mapped.orientation },
@@ -72,14 +73,6 @@ function spawn(ep: 'auto' | 'wasm'): void {
         }
       }
     } else if (m.type === 'init-error') {
-      if (m.retryWithWasm && ep === 'auto' && running.value) {
-        current.terminate()
-        worker = null
-        status.value = 'loading'
-        push(`WebGPU 初始化失败，切换新 worker 到 WASM：${m.message}`)
-        spawn('wasm')
-        return
-      }
       status.value = `error: ${m.message}`
       push(`初始化失败：${m.stage} ${m.message}`)
       stop()
@@ -93,7 +86,7 @@ function spawn(ep: 'auto' | 'wasm'): void {
     push(`worker 异常：${e.message}`)
     stop()
   }
-  current.postMessage({ type: 'init', modelUrl: MODEL_URL, ortDir: ORT_DIR, ep })
+  current.postMessage({ type: 'init', modelUrl: MODEL_URL, ortDir: ORT_DIR })
 }
 
 function start(): void {
@@ -102,7 +95,7 @@ function start(): void {
   keepAlive = true
   status.value = 'loading'
   push('初始化识别 worker…')
-  spawn('auto')
+  spawn()
 }
 
 function stop(): void {

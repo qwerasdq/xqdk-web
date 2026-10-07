@@ -7,16 +7,15 @@
 //
 // Vite module worker（ORT 是 ESM 包；引擎那个 Blob classic worker 是 pikafish 专属处理，不复制）
 //
-// 后端稳定性（W6d）：WebGPU 设备丢失（驱动重置/远程桌面/休眠唤醒）后 ORT 的 run() 会永久挂起，
-// 且同 realm 内无法安全重建任何会话（挂起的 run 使 release 失效，新会话报 Session already started）。
-// 因此设备丢失/超时只上报主线程，由主线程替换 worker 完成恢复（先 WASM、再尝试 WebGPU）。
+// 推理后端（W6e）：只用 WASM（SIMD+threads）。WebGPU 因设备丢失后 run() 永久挂起、无法在同 realm
+// 恢复而被移除，详见 model.ts 顶部说明。
 
 declare const self: DedicatedWorkerGlobalScope
 
 import { validate } from './assistBoard'
 import { BoardTracker } from './boardTracker'
 import { map } from './boardMapper'
-import { createSession, InferenceTimeoutError, runModel, watchDeviceLoss, type ModelSession } from './model'
+import { createSession, runModel, type ModelSession } from './model'
 import { decode } from './postprocess'
 import { preprocess } from './preprocess'
 import type { FromVisionWorker, MappedBoard, RecognitionResult, ToVisionWorker } from './types'
@@ -65,44 +64,24 @@ function toRecognition(mapped: MappedBoard): RecognitionResult {
   }
 }
 
-/**
- * WebGPU 设备丢失或挂起：上报主线程替换 worker 恢复。
- * 旧会话交给 worker 终止时的自动回收，不再尝试同 realm 重建。
- */
-function notifyBackendLost(reason: string): void {
-  if (disposed) return
-  post({ type: 'backend-lost', reason })
-  // 上报后本 worker 已不可信：拒绝后续帧，避免挂起 run 长期占用
-  model = null
-}
-
-function onDeviceLost(reason: string): void {
-  if (disposed || model?.ep !== 'webgpu') return
-  notifyBackendLost(`WebGPU 设备丢失：${reason}`)
-}
-
 async function handleInit(msg: Extract<ToVisionWorker, { type: 'init' }>): Promise<void> {
   if (initStarted || disposed) return
   initStarted = true
   const t0 = performance.now()
   disposed = false
   try {
-    model = await createSession(msg.modelUrl, msg.ortDir, msg.ep)
+    model = await createSession(msg.modelUrl, msg.ortDir)
   } catch (e) {
     model = null
     post({
       type: 'init-error',
       stage: 'session',
       message: e instanceof Error ? e.message : String(e),
-      // WebGPU and WASM share ORT's runtime state. Any auto WebGPU init failure
-      // must be retried in a fresh worker before starting WASM.
-      retryWithWasm: msg.ep === 'auto',
     })
     return
   }
-  post({ type: 'ready', ep: model.ep, loadMs: Math.round(performance.now() - t0), fallbackReason: model.fallbackReason })
-  send(`识别后端 ${model.ep}，输出行数 ${model.rows}`)
-  await watchDeviceLoss(model, onDeviceLost)
+  post({ type: 'ready', loadMs: Math.round(performance.now() - t0) })
+  send(`识别后端 wasm，输出行数 ${model.rows}`)
 }
 
 async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Promise<void> {
@@ -139,7 +118,6 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     result = mapped === null ? invalidResult('未识别到棋盘', detCount) : toRecognition(mapped)
   } catch (e) {
     result = invalidResult(e instanceof Error ? e.message : String(e), detCount)
-    if (e instanceof InferenceTimeoutError && model?.ep === 'webgpu') notifyBackendLost(e.message)
   } finally {
     bitmap.close()
     busy = false

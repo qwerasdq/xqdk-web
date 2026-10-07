@@ -1,7 +1,8 @@
 // useVision 主线程状态机测试：Worker 与 ScreenCapture 均 mock（node 环境无真实 API）
 //
-// W6d 重点覆盖后端恢复链路：backend-lost → WASM 兜底替换 → 自动重连 WebGPU（配额用尽转手动）→
-// 手动 reconnectWebGpu。Worker 消息由测试手动派发（真实 Worker 在 node 环境不存在）。
+// W6e：识别后端固定 WASM，WebGPU 及其恢复状态机已移除。本文件覆盖启动/就绪/错误/停止，
+// 以及「授权期间 worker 失败」的边界（start() 挂起时 worker 报错，不得读已置空的 capture、
+// 不得覆盖真实错误）。Worker 消息由测试手动派发（真实 Worker 在 node 环境不存在）。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useVision } from './useVision'
 import type { FromVisionWorker } from './types'
@@ -70,12 +71,8 @@ function lastWorker(): FakeWorker {
   return box.workers[box.workers.length - 1]!
 }
 
-function workerAt(i: number): FakeWorker {
-  return box.workers[i]!
-}
-
-function initEp(w: FakeWorker): string {
-  return (w.messages[0] as { ep: string }).ep
+function initMsg(w: FakeWorker): Record<string, unknown> {
+  return w.messages[0] as Record<string, unknown>
 }
 
 function dispatch(w: FakeWorker, msg: FromVisionWorker): void {
@@ -86,31 +83,16 @@ function dispatchErr(w: FakeWorker, message: string): void {
   w.onerror?.({ message })
 }
 
-/** 启动并收到 ready（默认 webgpu），返回主 worker */
-async function startCapturing(ready: FromVisionWorker = { type: 'ready', ep: 'webgpu', loadMs: 1 }): Promise<FakeWorker> {
-  const p = vision.start('auto')
+/** 启动并收到 ready，返回主 worker */
+async function startCapturing(ready: FromVisionWorker = { type: 'ready', loadMs: 1 }): Promise<FakeWorker> {
+  const p = vision.start()
   const w = lastWorker()
-  expect(initEp(w)).toBe('auto')
   dispatch(w, ready)
   await p
   return w
 }
 
-/** 触发设备丢失并完成 WASM 兜底替换，返回兜底 worker */
-async function fallbackToWasm(): Promise<{ main: FakeWorker; fallback: FakeWorker }> {
-  const main = await startCapturing()
-  dispatch(main, { type: 'backend-lost', reason: '设备被重置' })
-  const fallback = lastWorker()
-  expect(fallback).not.toBe(main)
-  expect(initEp(fallback)).toBe('wasm')
-  dispatch(fallback, { type: 'ready', ep: 'wasm', loadMs: 1 })
-  return { main, fallback }
-}
-
 beforeEach(() => {
-  vi.useFakeTimers()
-  // useVision 的重试定时器用 window.setTimeout；stub 指向（已 fake 的）全局 setTimeout
-  vi.stubGlobal('window', { setTimeout: globalThis.setTimeout })
   vi.stubGlobal('Worker', FakeWorkerImpl)
   box.workers.length = 0
   box.captures.length = 0
@@ -120,127 +102,92 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
 describe('useVision', () => {
-  it('初始为 idle 且无后端/来源', () => {
+  it('初始为 idle 且无来源', () => {
     expect(vision.state.state).toBe('idle')
-    expect(vision.state.backend).toBeNull()
     expect(vision.state.started).toBe(false)
     expect(vision.state.sourceInfo).toBeNull()
     expect(typeof vision.ackDecision).toBe('function')
   })
 
-  it('启动后收到 ready(webgpu) 进入 capturing 并记录来源', async () => {
+  // 后端固定 WASM：init 消息不应再带任何后端选择参数（W6e 回归点）
+  it('start：worker 只收到 modelUrl/ortDir，ready 后进入 capturing 并记录来源', async () => {
     const w = await startCapturing()
+    expect(initMsg(w)).toEqual({ type: 'init', modelUrl: '/models/x', ortDir: '/ort/' })
     expect(vision.state.state).toBe('capturing')
-    expect(vision.state.backend).toBe('webgpu')
     expect(vision.state.sourceInfo?.label).toBe('测试窗口')
-    expect(vision.state.backendNotice).toBe('')
     expect(w.terminated).toBe(false)
   })
 
-  it('自动模式下 WebGPU 降级 WASM 时给出提示', async () => {
-    await startCapturing({ type: 'ready', ep: 'wasm', loadMs: 1, fallbackReason: '模拟失败' })
-    expect(vision.state.state).toBe('capturing')
-    expect(vision.state.backend).toBe('wasm')
-    expect(vision.state.backendNotice).toContain('已降级 WASM 后端')
-  })
+  it('init-error：进入 error 态并回收 worker 与捕获', async () => {
+    const p = vision.start()
+    const w = lastWorker()
+    dispatch(w, { type: 'init-error', stage: 'session', message: '模型加载失败 404' })
+    await p
 
-  it('backend-lost：终止旧 worker，WASM 兜底接管并调度自动重连', async () => {
-    const { main, fallback } = await fallbackToWasm()
-    expect(main.terminated).toBe(true)
-    expect(vision.state.backend).toBe('wasm')
-    expect(vision.state.state).toBe('capturing')
-    expect(vision.state.backendNotice).toContain('正在尝试恢复 WebGPU')
-
-    // 重连定时器到点：起替换 worker 重试（ep 偏好为 auto）
-    vi.advanceTimersByTime(1800)
-    const retry = lastWorker()
-    expect(retry).not.toBe(fallback)
-    expect(initEp(retry)).toBe('auto')
-  })
-
-  it('自动重连拿到 WebGPU 后换线并清空提示', async () => {
-    const { fallback } = await fallbackToWasm()
-    vi.advanceTimersByTime(1800)
-    const retry = lastWorker()
-    dispatch(retry, { type: 'ready', ep: 'webgpu', loadMs: 1 })
-    expect(vision.state.backend).toBe('webgpu')
-    expect(vision.state.backendNotice).toBe('')
-    expect(fallback.terminated).toBe(true)
-    expect(workerAt(box.workers.length - 1)).toBe(retry)
-  })
-
-  it('自动重连连续失败耗尽配额后转手动，不再自动生成 worker', async () => {
-    const { fallback } = await fallbackToWasm()
-    // 第 1 次自动重试失败（仍只有 WASM）
-    vi.advanceTimersByTime(1800)
-    dispatch(lastWorker(), { type: 'ready', ep: 'wasm', loadMs: 1, fallbackReason: '无 GPU' })
-    // 第 2 次自动重试失败
-    vi.advanceTimersByTime(1800)
-    dispatch(lastWorker(), { type: 'ready', ep: 'wasm', loadMs: 1, fallbackReason: '无 GPU' })
-    expect(vision.state.backend).toBe('wasm')
-    expect(vision.state.backendNotice).toContain('点「重连 WebGPU」可重试')
-    expect(fallback.terminated).toBe(true)
-
-    // 配额耗尽：继续推进时间不再生成新 worker
-    const count = box.workers.length
-    vi.advanceTimersByTime(60_000)
-    expect(box.workers.length).toBe(count)
-  })
-
-  it('reconnectWebGpu：手动重试成功换线 / 失败继续 WASM', async () => {
-    await fallbackToWasm()
-    // 清掉自动重连定时器，直接手动重试（失败路径）
-    vision.reconnectWebGpu()
-    const manual = lastWorker()
-    expect(initEp(manual)).toBe('webgpu')
-    expect(vision.state.backendNotice).toContain('正在尝试恢复 WebGPU')
-    dispatch(manual, { type: 'ready', ep: 'wasm', loadMs: 1, fallbackReason: '无 GPU' })
-    expect(manual.terminated).toBe(true)
-    expect(vision.state.backend).toBe('wasm')
-    expect(vision.state.backendNotice).toContain('恢复 WebGPU 失败')
-
-    // 再次手动重试（成功路径）
-    vision.reconnectWebGpu()
-    const manual2 = lastWorker()
-    dispatch(manual2, { type: 'ready', ep: 'webgpu', loadMs: 1 })
-    expect(vision.state.backend).toBe('webgpu')
-    expect(vision.state.backendNotice).toBe('')
-  })
-
-  it('替换 worker（目标 WebGPU）init-error：提示失败并保留 WASM 主 worker', async () => {
-    const { fallback } = await fallbackToWasm()
-    vision.reconnectWebGpu()
-    const manual = lastWorker()
-    dispatchErr(manual, '创建会话失败')
-    expect(manual.terminated).toBe(true)
-    expect(vision.state.backend).toBe('wasm')
-    expect(vision.state.backendNotice).toContain('恢复 WebGPU 失败')
-    expect(fallback.terminated).toBe(false)
-    expect(vision.state.state).toBe('capturing')
-  })
-
-  it('WASM 兜底 worker init-error：整体进入 error 态', async () => {
-    const main = await startCapturing()
-    dispatch(main, { type: 'backend-lost', reason: '设备被重置' })
-    const fallback = lastWorker()
-    dispatchErr(fallback, 'wasm 会话创建失败')
     expect(vision.state.state).toBe('error')
-    expect(vision.state.lastError).toContain('wasm 会话创建失败')
-    expect(fallback.terminated).toBe(true)
+    expect(vision.state.lastError).toBe('识别模型初始化失败：模型加载失败 404')
+    expect(w.terminated).toBe(true)
+    expect(box.captures[0]?.started).toBe(false)
+  })
+
+  it('frame-result：更新逐帧诊断与 unstableStreak', async () => {
+    const w = await startCapturing()
+    dispatch(w, {
+      type: 'frame-result',
+      id: 1,
+      detections: 3,
+      mapped: null,
+      event: 'UNSTABLE',
+      movedSide: null,
+      redGo: true,
+      unstableStreak: 7,
+      pieceCount: null,
+      issues: ['未识别到棋盘'],
+      candidateFrames: 0,
+      frameW: 1280,
+      frameH: 720,
+      timings: { pre: 1, infer: 2, post: 3 },
+    })
+    expect(vision.state.unstableStreak).toBe(7)
+    expect(vision.state.lastFrameDiag).toEqual({
+      detections: 3,
+      pieceCount: null,
+      issues: ['未识别到棋盘'],
+      candidateFrames: 0,
+      frameW: 1280,
+      frameH: 720,
+    })
+  })
+
+  it('stop：回收 worker 与捕获，回到 idle', async () => {
+    const w = await startCapturing()
+    vision.stop()
+    expect(w.terminated).toBe(true)
+    expect(vision.state.state).toBe('idle')
+    expect(vision.state.started).toBe(false)
+    expect(vision.state.sourceInfo).toBeNull()
+    expect(box.captures[0]?.started).toBe(false)
+  })
+
+  it('worker 运行期异常：进入 error 态并回收', async () => {
+    const w = await startCapturing()
+    dispatchErr(w, '内存不足')
+    expect(vision.state.state).toBe('error')
+    expect(vision.state.lastError).toContain('内存不足')
+    expect(w.terminated).toBe(true)
   })
 
   it('授权期间 worker 初始化失败：保留真实错误、不崩溃、回收已拿到的流', async () => {
     box.holdStart = true
-    const p = vision.start('auto')
-    const auto = lastWorker()
+    const p = vision.start()
+    const w = lastWorker()
 
-    // 用户还在选窗口，worker 硬失败（无 WASM 重试）→ 进入 error 并回收 capture
-    dispatch(auto, { type: 'init-error', stage: 'session', message: '模型加载失败 404' })
+    // 用户还在选窗口，worker 硬失败 → 进入 error 并回收 capture
+    dispatch(w, { type: 'init-error', stage: 'session', message: '模型加载失败 404' })
     expect(vision.state.state).toBe('error')
     expect(vision.state.lastError).toBe('识别模型初始化失败：模型加载失败 404')
     expect(box.captures[0]?.started).toBe(false)
@@ -255,73 +202,5 @@ describe('useVision', () => {
     expect(vision.state.sourceInfo).toBeNull()
     expect(box.captures[0]?.attachCalls).toBe(0)
     expect(box.captures[0]?.started).toBe(false)
-  })
-
-  it('初始 auto WebGPU 初始化超时使用新 worker 切换 WASM', async () => {
-    const p = vision.start('auto')
-    const auto = lastWorker()
-    dispatch(auto, {
-      type: 'init-error',
-      stage: 'session',
-      message: '创建 webgpu 会话超时',
-      retryWithWasm: true,
-    })
-
-    const fallback = lastWorker()
-    expect(fallback).not.toBe(auto)
-    expect(auto.terminated).toBe(true)
-    expect(initEp(fallback)).toBe('wasm')
-    expect(vision.state.backendNotice).toContain('正在切换 WASM')
-
-    dispatch(fallback, { type: 'ready', ep: 'wasm', loadMs: 1 })
-    await p
-    expect(vision.state.state).toBe('capturing')
-    expect(vision.state.backend).toBe('wasm')
-  })
-
-  it('自动重连 WebGPU 初始化失败时：在保持 WASM 的同时切换新 WASM worker', async () => {
-    const { fallback } = await fallbackToWasm()
-    vi.advanceTimersByTime(1800)
-    const retry = lastWorker()
-    expect(initEp(retry)).toBe('auto')
-
-    dispatch(retry, {
-      type: 'init-error',
-      stage: 'session',
-      message: 'no available backend found',
-      retryWithWasm: true,
-    })
-    const replacement = lastWorker()
-    expect(replacement).not.toBe(retry)
-    expect(initEp(replacement)).toBe('wasm')
-    expect(vision.state.backend).toBe('wasm')
-    expect(vision.state.state).toBe('capturing')
-    expect(vision.state.backendNotice).toContain('继续使用 WASM')
-
-    dispatch(replacement, { type: 'ready', ep: 'wasm', loadMs: 1 })
-    expect(fallback.terminated).toBe(true)
-  })
-
-  it('替换进行中 stop：主 worker 与 pending 一并回收，回到 idle', async () => {
-    const main = await startCapturing()
-    dispatch(main, { type: 'backend-lost', reason: '设备被重置' })
-    const fallback = lastWorker()
-    vision.stop()
-    expect(main.terminated).toBe(true)
-    expect(fallback.terminated).toBe(true)
-    expect(vision.state.state).toBe('idle')
-    expect(vision.state.started).toBe(false)
-    expect(vision.state.backend).toBeNull()
-    expect(box.captures[0]?.started).toBe(false)
-  })
-
-  it('稳定运行后丢失（>STABLE_MS）重置自动恢复配额', async () => {
-    const main = await startCapturing()
-    vi.advanceTimersByTime(60_001)
-    dispatch(main, { type: 'backend-lost', reason: '设备被重置' })
-    const fallback = lastWorker()
-    dispatch(fallback, { type: 'ready', ep: 'wasm', loadMs: 1 })
-    // 配额被重置：本次降级只消耗 1 次，仍会调度自动重连
-    expect(vision.state.backendNotice).toContain('正在尝试恢复 WebGPU')
   })
 })

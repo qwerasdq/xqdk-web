@@ -83,17 +83,15 @@ export type TrackerEvent = 'NEW_BOARD' | 'SAME_BOARD' | 'NEW_GAME' | 'UNSTABLE'
 // ---- 主线程 ↔ 识别 worker 消息协议（W6b 使用）----
 
 export type ToVisionWorker =
-  | { type: 'init'; modelUrl: string; ortDir: string; ep: 'auto' | 'webgpu' | 'wasm' }
+  | { type: 'init'; modelUrl: string; ortDir: string }
   | { type: 'frame'; id: number; bitmap: ImageBitmap; frameW: number; frameH: number }
   | { type: 'reset' }
   | { type: 'ack-decision'; decision: 'apply' | 'discard'; canonical: Uint8Array }
   | { type: 'dispose' }
 
 export type FromVisionWorker =
-  | { type: 'ready'; ep: 'webgpu' | 'wasm'; loadMs: number; fallbackReason?: string }
-  | { type: 'init-error'; stage: 'fetch' | 'session' | 'ep'; message: string; retryWithWasm?: boolean }
-  /** 运行期后端失效（WebGPU 设备丢失/挂起）：需主线程替换 worker 恢复 */
-  | { type: 'backend-lost'; reason: string }
+  | { type: 'ready'; loadMs: number }
+  | { type: 'init-error'; stage: 'fetch' | 'session'; message: string }
   | {
       type: 'frame-result'
       id: number

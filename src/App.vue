@@ -159,7 +159,7 @@ const vision = useVision(MODEL_URL, ORT_DIR, {
 })
 
 function onVisionStart(): void {
-  void vision.start('auto')
+  void vision.start()
 }
 function onVisionStop(): void {
   vision.stop()
@@ -602,14 +602,12 @@ function switchMode(m: Mode): void {
           :selected-ucci="selectedUcci"
           :selected-plan="selectedPlan"
           :vision-state="vision.state.state"
-          :vision-backend="vision.state.backend"
           :vision-error="vision.state.lastError"
           :vision-unstable-streak="vision.state.unstableStreak"
           :vision-started="vision.state.started"
           :vision-source-info="vision.state.sourceInfo"
           :vision-pending-sync="visionPendingSnapshot"
           :vision-frame-diag="vision.state.lastFrameDiag"
-          :vision-backend-notice="vision.state.backendNotice"
           @update:my-side="onMySideChange"
           @select-candidate="(u) => (selectedUcci = u)"
           @select-plan="(i) => (selectedPlan = i)"
@@ -618,7 +616,6 @@ function switchMode(m: Mode): void {
           @vision-confirm-pending="confirmPendingVision"
           @vision-discard-pending="discardPendingVision"
           @vision-preview-ready="vision.attachPreview"
-          @vision-reconnect="vision.reconnectWebGpu"
         />
 
         <div class="controls" v-if="!isReview">

@@ -2,6 +2,46 @@
 
 Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v2.0）。
 
+## 2026-10-07 — W6e：识别后端改为纯 WASM，移除 WebGPU 与整套恢复状态机
+
+### 背景
+
+- 现象：WebGPU 后端不稳定。ORT 1.22 的 WebGPU 在设备丢失（驱动重置/多显卡切换/远程桌面/休眠唤醒）
+  后 `run()` 永久挂起，且同 realm 无法重建会话——W6d 只能用「换 worker + 会话/推理超时 + 自动重连配额」兜底。
+- 重新评估收益：识别按 ~800ms/帧节流，模型是 yolov5n@640（7.2MB），WASM SIMD 已够用。
+  本机实测（Playwright + headless Chromium，46 帧）：推理 p50 83.5ms / p95 122.7ms / max 141ms，
+  含预处理与后处理共 ~92.5ms/帧，相对 800ms 预算有 8.6 倍余量，无丢帧（busy=0）。
+- 结论：用一整套恢复状态机换一个用不上的加速不划算。先改为「默认 WASM + WebGPU 可选勾选」，
+  确认无回退需求后直接移除 WebGPU（连带换用非 jsep ORT 构建，wasm 20.9MiB → 10.7MiB）。
+
+### 本次交付
+
+| 文件 | 说明 |
+|---|---|
+| src/features/assist/AssistPanel.vue | 中间层转发丢参（`@start="emit('vision-start')"` 未透传 ep）：首次改造时由 E2E 抓到——勾选 WASM 仍走 auto→WebGPU；现协议已无后端参数 |
+| src/vision/model.ts | 移除 WebGPU：`executionProviders:['wasm']`、删 `watchDeviceLoss`/会话超时/适配器重试/`Backend` 类型；入口改 `onnxruntime-web/wasm` |
+| src/vision/worker.ts | 删 `backend-lost` 上报与设备丢失监听；`init-error` 不再带 `retryWithWasm` |
+| src/vision/useVision.ts | 删整套恢复状态机（`pending`/`pendingTarget`/自动重连配额/`reconnectWebGpu`/`backend`/`backendNotice`），`start()` 不再收后端参数 |
+| src/vision/types.ts | 协议去掉 `ep`/`fallbackReason`/`retryWithWasm`/`backend-lost` |
+| src/features/assist/VisionControl.vue | 去掉 WebGPU 勾选框、降级提示条、「重连 WebGPU」按钮与相关样式 |
+| src/vision/VisionLab.vue | 去掉 `?ep=` 后端选择；帧日志新增预处理/推理/后处理耗时（benchmark 用，保留为诊断） |
+| scripts/vision-assets.mjs | 改用非 jsep 资产（10.69 MiB），并清理 public/ort 下过期 ort 产物 |
+| scripts/deploy.sh | ORT 资产校验路径同步改为非 jsep |
+| src/vision/useVision.test.ts | 重写：移除 12 个 WebGPU 恢复用例，保留启动/就绪/错误/停止/授权期失败边界 + init 消息不含后端参数 |
+| CLAUDE.md / AGENTS.md | Phase 2 说明改为 `onnxruntime-web/wasm`，注明不用 WebGPU EP 的原因 |
+
+### 验证
+
+- 97 个单测全过（原 105：删 12 个 WebGPU 恢复用例，新增 4 个基础用例）；`vue-tsc` + `npm run build` 全绿
+- 浏览器实测 VisionLab：加载 394ms，帧 1-20 推理 61-99ms，NEW_BOARD 识别 32 子，无页面错误
+- 浏览器实测支招页（假屏幕源）：启动落到「识别中」，界面无任何 WebGPU 残留文案，无错误
+- 产物：worker chunk 370.68 kB → 60.96 kB；`public/ort` 只剩 10.69 MiB 的 `ort-wasm-simd-threaded.wasm`
+- 本机 headless Chromium 取不到 WebGPU adapter（`Failed to get GPU adapter`），故未做 WebGPU 对比基准
+
+### 遗留 / 待办
+
+- [ ] 真实 JJ 窗口下确认 WASM 后端长时间运行无累积卡顿
+
 ## 2026-10-06 — 修复「无法开始屏幕捕获：reading attachPreview」
 
 ### 背景

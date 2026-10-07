@@ -230,7 +230,9 @@ SVG 棋盘组件绑定规则层数据：`new Game(fen)` → 渲染 → 用户走
 **Phase 2（屏幕识别自动同步）**：
 
 1. `getDisplayMedia` 捕获 JJ 象棋窗口/标签页（每次会话需用户授权）
-2. canvas 抽帧 → `onnxruntime-web`（WebGL/WASM EP，Worker 内运行）加载 YOLOv5 模型
+2. canvas 抽帧 → `onnxruntime-web/wasm`（WASM SIMD+threads EP，Worker 内运行）加载 YOLOv5 模型
+   （**不用 WebGPU EP**：ORT 1.22 下设备丢失后 `run()` 永久挂起且同 realm 无法重建，恢复只能换 worker；
+   识别按 ~800ms/帧节流、实测 WASM 推理 p50 83ms，余量充足。详见 DEVLOG W6e）
 3. 模型来源：`D:\chess-dike\app\src\main\assets\yolov5n_xq_fp16.tflite` 转 ONNX（tflite2onnx 工具）
 4. 棋盘映射逻辑直译 `DetectionBoardMapper.kt`（棋盘框锚点网格映射 / 双王位置判定朝向 / 越界丢弃）
 5. YOLO 后处理（NMS）照抄 `YoloPostprocessor.kt`；多帧稳定确认后才更新局面

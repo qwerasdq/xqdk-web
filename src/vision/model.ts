@@ -1,54 +1,32 @@
-// onnxruntime-web 会话管理：EP 选择（WebGPU 优先 → WASM 回退）、wasm 路径与线程配置、形状自检
+// onnxruntime-web 会话管理：WASM(SIMD+threads) EP、wasm 路径与线程配置、形状自检
 //
 // 部署约束：ort 的 wasm 二进制由 scripts/vision-assets.mjs 复制到 public/ort/（不入 git），
 // 运行时通过 ortDir 参数告知本模块（由主线程按 document.baseURI 计算，兼容子路径部署）。
 //
-// 稳定性约束（W6d 加固）：WebGPU 设备丢失（驱动重置/多显卡切换/远程桌面/休眠唤醒）后，
-// ORT 1.22 的 session.run() 不会 reject，而是**永久挂起**（本机实测）——只靠 try/catch 无法恢复。
-// 因此这里提供三层防护：
-//   1. 初始化预热——首次 WebGPU 推理含着色器编译，预热把这段时间前移，同时验证后端真实可用，
-//      失败的会话不会拖到第一帧才暴露；瞬时适配器失败（多显卡切换/驱动繁忙）重试一次。
-//   2. watchDeviceLoss——监听运行时设备丢失（主动发现）。
-//   3. 推理超时——run() 挂起超过 INFER_TIMEOUT_MS 判定后端断开（被动发现）。
+// 后端选择（W6e）：只保留 WASM。ORT 1.22 的 WebGPU 在设备丢失（驱动重置/多显卡切换/远程桌面/
+// 休眠唤醒）后 run() 会永久挂起、同 realm 无法重建会话，只能靠换 worker 兜底；而识别按 ~800ms/帧
+// 节流，本机实测推理 p50 83ms（含前后处理 ~92ms/帧），WASM 已有 8 倍余量。用一整套恢复状态机换一个
+// 用不上的加速不划算，故移除 WebGPU，并改用非 jsep 构建（wasm 由 20.9MiB 降到 10.7MiB）。
 
-import * as ort from 'onnxruntime-web'
+import * as ort from 'onnxruntime-web/wasm'
 import { MODEL_INPUT } from './postprocess'
 
-export type Backend = 'webgpu' | 'wasm'
-
-/** 单帧推理超时：预热后稳态 ~100ms，超时基本可断定后端挂起（设备丢失/驱动异常） */
+/** 单帧推理超时：预热后稳态 ~100ms，超时基本可断定后端异常（兜底，避免 run() 挂起后 worker 永久卡住） */
 export const INFER_TIMEOUT_MS = 5000
-
-/** 会话创建 + 预热超时：设备异常时 ORT 可能既不返回也不报错，超时后走重试/回退，避免卡死在加载中 */
-const SESSION_TIMEOUT_MS = 15000
-
-/** WebGPU 创建失败后的重试间隔（适配器瞬时失败常见于多显卡机器） */
-const WEBGPU_RETRY_DELAY_MS = 400
 
 export interface ModelSession {
   session: ort.InferenceSession
-  ep: Backend
   inputName: string
   outputName: string
   /** 输出行数（应为 ANCHORS=25200），用于运行时自检 */
   rows: number
-  /** ep 落到 wasm 且曾尝试 WebGPU 时，记录 WebGPU 失败原因（UI 展示用） */
-  fallbackReason?: string
 }
 
-/** 推理超时（后端挂起，典型场景是 WebGPU 设备丢失） */
+/** 推理超时（后端异常挂起） */
 export class InferenceTimeoutError extends Error {
   constructor(ms: number) {
     super(`推理超时 ${ms}ms（识别后端可能已断开）`)
     this.name = 'InferenceTimeoutError'
-  }
-}
-
-/** 会话创建超时（设备异常，重试大概率同样卡死，不再重试） */
-export class SessionInitTimeoutError extends Error {
-  constructor(ep: Backend) {
-    super(`创建 ${ep} 会话超时（${SESSION_TIMEOUT_MS}ms）`)
-    this.name = 'SessionInitTimeoutError'
   }
 }
 
@@ -62,13 +40,8 @@ export function setupOrt(ortDir: string): void {
   // 未隔离时显式降到单线程，避免 ort 内部警告与潜在失败
   const isolated = typeof self !== 'undefined' && (self as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated === true
   ort.env.wasm.numThreads = isolated ? Math.min(4, Math.max(1, (navigator.hardwareConcurrency ?? 4) - 1)) : 1
-  ort.env.webgpu.powerPreference = 'high-performance'
   ort.env.logLevel = 'error'
   envReady = true
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** 竞速超时包装：超时后抛出可识别的错误（原 Promise 被放弃——挂起的 run() 永不 settle，无人再 await 它） */
@@ -86,17 +59,6 @@ export function withTimeout<T>(p: Promise<T>, ms: number, err: () => Error): Pro
       },
     )
   })
-}
-
-async function createWith(modelUrl: string, ep: Backend): Promise<ort.InferenceSession> {
-  return withTimeout(
-    ort.InferenceSession.create(modelUrl, {
-      executionProviders: [ep],
-      graphOptimizationLevel: 'all',
-    }),
-    SESSION_TIMEOUT_MS,
-    () => new SessionInitTimeoutError(ep),
-  )
 }
 
 /** 执行一次推理（裸会话版），超时抛 InferenceTimeoutError */
@@ -124,9 +86,12 @@ function safeRelease(session: ort.InferenceSession): void {
   }
 }
 
-/** 创建 + 形状自检 + 预热。任一步失败则释放会话并抛出，由上层决定重试/回退 */
-async function prepareSession(modelUrl: string, ep: Backend): Promise<ModelSession> {
-  const session = await createWith(modelUrl, ep)
+/** 创建 + 形状自检 + 预热。任一步失败则释放会话并抛出 */
+async function prepareSession(modelUrl: string): Promise<ModelSession> {
+  const session = await ort.InferenceSession.create(modelUrl, {
+    executionProviders: ['wasm'],
+    graphOptimizationLevel: 'all',
+  })
   try {
     const input = session.inputMetadata[0]
     const output = session.outputMetadata[0]
@@ -142,12 +107,11 @@ async function prepareSession(modelUrl: string, ep: Backend): Promise<ModelSessi
       throw new Error(`模型输出形状 ${JSON.stringify(output.shape)} 与预期 [1,N,20] 不符`)
     }
 
-    // 预热（零输入，结果丢弃）：WebGPU 首次推理含着色器编译（本机实测 ~0.8s，弱显卡更久）
-    await runCore(session, input.name, output.name, new Float32Array(3 * MODEL_INPUT * MODEL_INPUT), SESSION_TIMEOUT_MS)
+    // 预热（零输入，结果丢弃）：把首次推理的 wasm 实例/线程池初始化前移，同时验证会话真实可用
+    await runCore(session, input.name, output.name, new Float32Array(3 * MODEL_INPUT * MODEL_INPUT), INFER_TIMEOUT_MS)
 
     return {
       session,
-      ep,
       inputName: input.name,
       outputName: output.name,
       rows: outShape[1]!,
@@ -158,53 +122,10 @@ async function prepareSession(modelUrl: string, ep: Backend): Promise<ModelSessi
   }
 }
 
-/**
- * 创建会话。prefer='auto' 时先试 WebGPU（失败重试一次后抛出，由上层换新 Worker 启动 WASM），
- * prefer='webgpu' 时失败直接抛出。不能在同一 Worker 内回退 WASM：WebGPU 与 WASM 共享 ORT runtime，
- * 前者初始化失败可能会把后者标记为 aborted。
- */
-export async function createSession(
-  modelUrl: string,
-  ortDir: string,
-  prefer: 'auto' | Backend = 'auto',
-): Promise<ModelSession> {
+/** 创建 WASM 会话。失败即抛出，由上层展示错误（不做同 realm 重试/回退） */
+export async function createSession(modelUrl: string, ortDir: string): Promise<ModelSession> {
   setupOrt(ortDir)
-  if (prefer === 'wasm') return prepareSession(modelUrl, 'wasm')
-
-  let lastErr: unknown = null
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      return await prepareSession(modelUrl, 'webgpu')
-    } catch (e) {
-      lastErr = e
-      if (prefer === 'webgpu') throw e
-      // 超时说明设备真的异常，重试大概率同样卡 15s，不再重试
-      if (e instanceof SessionInitTimeoutError) break
-      if (attempt === 0) await delay(WEBGPU_RETRY_DELAY_MS)
-    }
-  }
-
-  // A timed-out WebGPU initialization may still be running inside ORT. Starting
-  // WASM in this realm can re-enter initWasm() and fail with "multiple calls".
-  // Let the caller terminate this worker and retry WASM in a fresh realm.
-  if (lastErr instanceof SessionInitTimeoutError) throw lastErr
-
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
-}
-
-/**
- * 监听会话所用 WebGPU 设备的丢失事件（WASM 会话为 no-op）。
- * 设备丢失后该会话的 run() 会永久挂起，必须靠此信号（或推理超时）提前切换后端。
- */
-export async function watchDeviceLoss(m: ModelSession, onLost: (reason: string) => void): Promise<void> {
-  if (m.ep !== 'webgpu') return
-  try {
-    const device = (await ort.env.webgpu.device) as unknown as { lost?: Promise<{ reason?: string }> } | undefined
-    if (!device || typeof device.lost?.then !== 'function') return
-    void device.lost.then((info) => onLost(info?.reason ?? 'unknown'))
-  } catch {
-    // 拿不到设备对象时依赖推理超时兜底，不影响会话本身
-  }
+  return prepareSession(modelUrl)
 }
 
 /** 执行一次推理，返回扁平的 [rows*20] float32（已拷贝出 ort 张量）。超时抛 InferenceTimeoutError */

@@ -1,4 +1,4 @@
-// model.ts 稳定性逻辑：超时兜底（WebGPU 设备丢失后 ORT 的 run() 会永久挂起，不会 reject）
+// model.ts 推理逻辑：输出拷贝、缺张量报错、超时兜底（后端挂起时 run() 不会 reject）
 import { describe, expect, it } from 'vitest'
 import { InferenceTimeoutError, runModel, withTimeout, type ModelSession } from './model'
 
@@ -21,7 +21,6 @@ describe('withTimeout', () => {
 function fakeSession(run: () => Promise<Record<string, unknown>>): ModelSession {
   return {
     session: { run } as unknown as ModelSession['session'],
-    ep: 'webgpu',
     inputName: 'images',
     outputName: 'output0',
     rows: 25200,
@@ -29,7 +28,7 @@ function fakeSession(run: () => Promise<Record<string, unknown>>): ModelSession 
 }
 
 describe('runModel', () => {
-  it('后端挂起（设备丢失）时抛推理超时，而不是无限等待', async () => {
+  it('后端挂起时抛推理超时，而不是无限等待', async () => {
     const m = fakeSession(() => new Promise(() => {}))
     await expect(runModel(m, new Float32Array(3 * 640 * 640), 20)).rejects.toBeInstanceOf(InferenceTimeoutError)
   })
