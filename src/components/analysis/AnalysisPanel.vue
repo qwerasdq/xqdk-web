@@ -2,6 +2,7 @@
 // 分析面板：评分/胜率 + 候选着法列表 + PV 变例（中文着法）
 import { computed } from 'vue'
 import type { AnalysisLine } from '../../engine/useEngine'
+import { scoreText } from '../../engine/scoreText'
 import { describeMove, pvToChinese } from '../../xiangqi/pv'
 
 const props = defineProps<{
@@ -15,14 +16,6 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: 'select', ucci: string): void }>()
 
 const mainLine = computed(() => (props.lines.length > 0 ? props.lines[0]! : null))
-
-// 主变例评分文案：+0.35 / -0.62 / M5（红方视角）
-function scoreText(l: AnalysisLine): string {
-  const s = l.scoreRed
-  if (s.kind === 'mate') return s.value > 0 ? `红方 ${s.value} 步被杀` : `红方 ${-s.value} 步杀`
-  const v = s.value / 100
-  return (v >= 0 ? '+' : '') + v.toFixed(2)
-}
 
 function winText(l: AnalysisLine): string {
   return (l.winRateRed * 100).toFixed(1) + '%'
@@ -39,7 +32,7 @@ const pvChs = computed(() => {
 <template>
   <div class="analysis-panel">
     <div class="eval-row" v-if="mainLine">
-      <span class="score" :class="{ red: mainLine.scoreRed.value > 0 }">{{ scoreText(mainLine) }}</span>
+      <span class="score" :class="{ red: mainLine.scoreRed.value > 0 }">{{ scoreText(mainLine.scoreRed) }}</span>
       <span class="winrate">红方胜率 {{ winText(mainLine) }}</span>
       <span class="depth">深度 {{ mainLine.depth }}</span>
     </div>
@@ -57,7 +50,7 @@ const pvChs = computed(() => {
       >
         <span class="cand-num">{{ l.multipv }}</span>
         <span class="cand-move">{{ l.pv.length > 0 ? describeMove(fen, l.pv[0]!) : '—' }}</span>
-        <span class="cand-score" :class="{ red: l.scoreRed.value > 0 }">{{ scoreText(l) }}</span>
+        <span class="cand-score" :class="{ red: l.scoreRed.value > 0 }">{{ scoreText(l.scoreRed) }}</span>
         <span class="cand-win">{{ winText(l) }}</span>
       </button>
     </div>

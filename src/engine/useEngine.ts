@@ -339,7 +339,11 @@ function toLines(collected: Map<number, EngineInfo>, sideToMove: 'w' | 'b'): Ana
     if (info.wdl) {
       winRateRed = wdlToWinRate(info.wdl, sideToMove)
     } else {
-      winRateRed = cpToWinRate(scoreRed.kind === 'cp' ? scoreRed.value : scoreRed.value > 0 ? -100000 : 100000)
+      // 无 wdl 时的兜底：mate 换算成极值 cp 再走 sigmoid。
+      // scoreRed 已换算成红方视角，正 = 红方将杀 → 胜率应趋近 1 → 取正极值。
+      winRateRed = cpToWinRate(
+        scoreRed.kind === 'cp' ? scoreRed.value : scoreRed.value > 0 ? 100000 : -100000,
+      )
     }
     lines.push({ multipv, depth: info.depth, scoreRed, winRateRed, pv: info.pv })
   }

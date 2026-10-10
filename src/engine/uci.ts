@@ -5,7 +5,11 @@ export type SideToMove = 'w' | 'b'
 
 export interface EngineScore {
   kind: 'cp' | 'mate'
-  /** cp 为厘兵；mate 为正 = 走子方将在 N 步内被将死（负数 = 将杀对方） */
+  /**
+   * cp 为厘兵；mate 为正 = **走子方**在 N 步内将杀对方（负 = 被对方将杀）。
+   * UCI 规范："if the engine is getting mated use negative values"。
+   * 已用真实 Pikafish WASM 实测：红方双车必胜局面红先为 `mate 1`，同局面轮到黑走为 `mate -1`。
+   */
   value: number
 }
 
