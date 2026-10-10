@@ -399,6 +399,34 @@ export function isJiangShuaiInDanger(piece: number, pos: Position, board: Board)
   return false
 }
 
+/** 坐标 → UCCI 着法串（列 a-i，行 0-9，a0 为左下），与 Move.getUCCIString 同口径 */
+function toUcci(fx: number, fy: number, tx: number, ty: number): string {
+  return (
+    String.fromCharCode(97 + fx) + (9 - fy) + String.fromCharCode(97 + tx) + (9 - ty)
+  )
+}
+
+/**
+ * 当前行棋方的全部合法着法（UCCI 串数组）。
+ * 用途：UCI 没有「排除着法」指令，searchmoves 是「只搜这些」，
+ * 需要排除某步时必须传「全部合法着法 − 排除项」。
+ */
+export function allLegalMoves(board: Board): string[] {
+  const result: string[] = []
+  const redSide = board.bRedGo
+  for (let y = 0; y < BOARD_PIECE_HEIGHT; y++) {
+    for (let x = 0; x < BOARD_PIECE_WIDTH; x++) {
+      const piece = board.getPieceByXY(x, y)
+      if (!Piece.isValid(piece)) continue
+      if (Piece.isRed(piece) !== redSide) continue
+      for (const to of legalMoves(piece, x, y, board)) {
+        result.push(toUcci(x, y, to.x, to.y))
+      }
+    }
+  }
+  return result
+}
+
 // 判断将帅是否被将死：枚举己方全部着法逐一尝试解将，全部失败则为将死
 export function isJiangShuaiDead(piece: number, bossPos: Position, board: Board): boolean {
   const b = board.clone()

@@ -11,7 +11,8 @@ export interface AnalysisCacheRequest {
   movetime?: number
   /** 实际生效的 MultiPV（缺省 3，与 engineAnalyze 一致） */
   multipv?: number
-  excluded?: string[]
+  /** UCI searchmoves 语义：只搜列出的着法（空/缺省 = 不限制） */
+  searchmoves?: string[]
 }
 
 export interface AnalysisCacheEntry {
@@ -19,12 +20,12 @@ export interface AnalysisCacheEntry {
   result: BestmoveResult
 }
 
-/** 缓存键：FEN 规范化 + 有序着法 + 搜索参数（excluded 排序去敏） */
+/** 缓存键：FEN 规范化 + 有序着法 + 搜索参数（searchmoves 排序去敏） */
 export function makeAnalysisCacheKey(req: AnalysisCacheRequest): string {
   const multipv = req.multipv ?? 3
   const limit = req.depth != null ? `d${req.depth}` : req.movetime != null ? `t${req.movetime}` : 'd16'
-  const excluded = [...(req.excluded ?? [])].sort().join(',')
-  return [req.fen.trim(), req.moves.join(' '), limit, `p${multipv}`, excluded].join('|')
+  const searchmoves = [...(req.searchmoves ?? [])].sort().join(',')
+  return [req.fen.trim(), req.moves.join(' '), limit, `p${multipv}`, searchmoves].join('|')
 }
 
 export interface AnalysisCache {

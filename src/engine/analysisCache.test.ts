@@ -32,9 +32,9 @@ describe('makeAnalysisCacheKey', () => {
     expect(makeAnalysisCacheKey({ fen: FEN, moves: ['h2e2'], depth: 16, multipv: 3 })).not.toBe(base)
   })
 
-  it('excluded 排序后等价（顺序不敏感），缺省与空数组等价', () => {
-    const a = makeAnalysisCacheKey({ fen: FEN, moves: [], depth: 16, excluded: ['h2e2', 'b0c2'] })
-    const b = makeAnalysisCacheKey({ fen: FEN, moves: [], depth: 16, excluded: ['b0c2', 'h2e2'] })
+  it('searchmoves 排序后等价（顺序不敏感），缺省与空数组等价', () => {
+    const a = makeAnalysisCacheKey({ fen: FEN, moves: [], depth: 16, searchmoves: ['h2e2', 'b0c2'] })
+    const b = makeAnalysisCacheKey({ fen: FEN, moves: [], depth: 16, searchmoves: ['b0c2', 'h2e2'] })
     const c = makeAnalysisCacheKey({ fen: FEN, moves: [], depth: 16 })
     expect(a).toBe(b)
     expect(a).not.toBe(c)

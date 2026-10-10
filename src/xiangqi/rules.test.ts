@@ -3,7 +3,13 @@
 import { describe, it, expect } from 'vitest'
 import { Board } from './board'
 import { Game, GameStatus } from './game'
-import { legalMoves, possibleToPositions, isJiangShuaiInDanger, findJiangShuaiPos } from './rule'
+import {
+  legalMoves,
+  possibleToPositions,
+  isJiangShuaiInDanger,
+  findJiangShuaiPos,
+  allLegalMoves,
+} from './rule'
 import { ucciToChinese } from './move'
 import * as Piece from './piece'
 import { Position } from './position'
@@ -222,5 +228,61 @@ describe('possibleToPositions 与 Android 版一致性抽查', () => {
     expect(possibleToPositions(Piece.WJU, 0, 9, b).length).toBe(2) // 车九进一/进二（y=6 己方兵挡）
     expect(possibleToPositions(Piece.WPAO, 1, 7, b).length).toBe(12) // 炮八：横向6 + 纵向5移1吃
     expect(possibleToPositions(Piece.WBING, 4, 6, b).length).toBe(1) // 兵五进一
+  })
+})
+
+// 黑将 (3,0)，黑卒 (3,7)(5,8)，红帅 (4,9)：黑卒 (3,7)->(3,8) 后封死红帅全部去路
+const DELIVER_STALEMATE_FEN = '3k5/9/9/9/9/9/9/3p5/5p3/4K4 b - - 0 1'
+
+describe('困毙（由走子方造成）', () => {
+  it('走子前对方尚有逃格，走子后无着可走 -> 对方判负（走子方获胜）', () => {
+    const g = new Game()
+    expect(g.restoreFromFEN(DELIVER_STALEMATE_FEN)).toBe(true)
+
+    // 走子前：红帅只剩 (3,9)=d0 一个逃格
+    const before = g.currentBoard.clone()
+    before.bRedGo = true
+    expect(allLegalMoves(before)).toEqual(['e0d0'])
+
+    // 黑卒 (3,7)=d2 -> (3,8)=d1，封死 d0
+    const st = g.movePiece(new Position(3, 7), new Position(3, 8))
+    expect(st.status).toBe(GameStatus.STALEMATE)
+    expect(g.isGameOver).toBe(true)
+  })
+})
+
+describe('allLegalMoves（当前行棋方全部合法着法）', () => {
+  function load(fen: string): Board {
+    const b = new Board()
+    expect(b.restoreFromFEN(fen)).toBe(true)
+    return b
+  }
+
+  it('初始局面红先：44 着，UCCI 格式正确且无重复', () => {
+    const moves = allLegalMoves(load(INITIAL_FEN))
+    expect(moves.length).toBe(44) // 象棋开局着法数（与 xqbase 一致）
+    expect(moves.every((m) => /^[a-i][0-9][a-i][0-9]$/.test(m))).toBe(true)
+    expect(new Set(moves).size).toBe(moves.length)
+  })
+
+  it('黑先时数量相同、着法不同（只列当前行棋方）', () => {
+    const red = allLegalMoves(load(INITIAL_FEN))
+    const black = allLegalMoves(load(INITIAL_FEN.replace(' w ', ' b ')))
+    expect(black.length).toBe(44)
+    // 红方着法起点的行号是 0/2/3（红方半场），黑方是 6/7/9
+    expect(red.every((m) => Number(m[1]) <= 3)).toBe(true)
+    expect(black.every((m) => Number(m[1]) >= 6)).toBe(true)
+  })
+
+  it('被牵制的黑车不能离线（走开即送将）', () => {
+    // 黑车 (4,1)=e8 挡在红车 (4,9) 与黑将 (4,0) 之间
+    const moves = allLegalMoves(load(SENDCHECK_FEN))
+    expect(moves).toContain('e8e7') // 沿线移动仍挡将，合法
+    expect(moves).not.toContain('e8d8') // 离线即送将，被 legalMoves 过滤
+    expect(moves.filter((m) => m.startsWith('e8')).every((m) => m[2] === 'e')).toBe(true)
+  })
+
+  it('困毙局面（行棋方无着可走）返回空数组', () => {
+    expect(allLegalMoves(load(STALEMATE_FEN))).toEqual([])
   })
 })

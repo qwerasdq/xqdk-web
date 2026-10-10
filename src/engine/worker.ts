@@ -10,7 +10,7 @@
 // 主线程 → worker：
 //   { type: 'init', engineDir }             引擎目录绝对 URL（结尾带 /）
 //   { type: 'uci', cmd }                    setoption / ucinewgame 直通
-//   { type: 'go', id, fen, moves, goCmd, excluded }  搜索请求
+//   { type: 'go', id, fen, moves, goCmd, searchmoves }  搜索请求
 //   { type: 'stopSearch', id }              中止指定搜索（闪电出着）
 // worker → 主线程：
 //   { type: 'ready', engineId, engineName } UCI 握手完成
@@ -53,8 +53,9 @@ function startSearch(go) {
   activeSearchId = go.id
   var movesPart = go.moves.length > 0 ? ' moves ' + go.moves.join(' ') : ''
   sendUci('position fen ' + go.fen + movesPart)
-  var excludedPart = go.excluded.length > 0 ? ' searchmoves ' + go.excluded.join(' ') : ''
-  sendUci('go ' + go.goCmd + excludedPart)
+  // UCI searchmoves = 只搜列出的着法（不是排除）。空数组 = 不限制。
+  var restrictPart = go.searchmoves.length > 0 ? ' searchmoves ' + go.searchmoves.join(' ') : ''
+  sendUci('go ' + go.goCmd + restrictPart)
 }
 
 function requestSearch(go) {

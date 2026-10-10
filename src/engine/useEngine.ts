@@ -25,8 +25,12 @@ export interface SearchRequest {
   depth?: number
   movetime?: number
   multipv?: number
-  /** 排除的着法（UCCI），用于长将/困毙拦截后的重搜 */
-  excluded?: string[]
+  /**
+   * 限制根着法搜索范围（UCI searchmoves 语义：**只搜**列出的着法）。
+   * 注意 UCI 没有「排除着法」指令——要排除若干着法，传「全部合法着法 − 排除项」
+   * （见 xiangqi/rule.ts 的 allLegalMoves）。空数组 = 不限制。
+   */
+  searchmoves?: string[]
 }
 
 // 引擎文件目录绝对 URL（build 后 base './' 下仍正确）
@@ -215,7 +219,7 @@ export async function engineSearch(req: SearchRequest): Promise<BestmoveResult> 
   await waitReady()
   ensureMultiPv(1) // 对弈搜索固定单线
   const id = ++searchSeq
-  const { fen, moves, depth, movetime, excluded } = req
+  const { fen, moves, depth, movetime, searchmoves } = req
   let goCmd = ''
   if (depth != null) goCmd = `depth ${depth}`
   else if (movetime != null) goCmd = `movetime ${movetime}`
@@ -230,7 +234,7 @@ export async function engineSearch(req: SearchRequest): Promise<BestmoveResult> 
       clearTimeout(timer)
       resolve(r)
     })
-    worker?.postMessage({ type: 'go', id, fen, moves, goCmd, excluded: excluded ?? [] })
+    worker?.postMessage({ type: 'go', id, fen, moves, goCmd, searchmoves: searchmoves ?? [] })
   })
 }
 
@@ -287,7 +291,7 @@ export async function engineAnalyze(
 
   return new Promise<BestmoveResult>((resolve, reject) => {
     const id = ++searchSeq
-    const { fen, moves, depth, movetime, excluded } = req
+    const { fen, moves, depth, movetime, searchmoves } = req
     let goCmd = ''
     if (depth != null) goCmd = `depth ${depth}`
     else if (movetime != null) goCmd = `movetime ${movetime}`
@@ -323,7 +327,7 @@ export async function engineAnalyze(
       resolve(r)
     })
 
-    worker?.postMessage({ type: 'go', id, fen, moves, goCmd, excluded: excluded ?? [] })
+    worker?.postMessage({ type: 'go', id, fen, moves, goCmd, searchmoves: searchmoves ?? [] })
   })
 }
 

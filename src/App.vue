@@ -7,6 +7,7 @@ import { Game, GameStatus } from './xiangqi/game'
 import { Position } from './xiangqi/position'
 import { Move } from './xiangqi/move'
 import * as Piece from './xiangqi/piece'
+import { allLegalMoves } from './xiangqi/rule'
 import BoardView from './components/BoardView.vue'
 import EvalBar from './components/analysis/EvalBar.vue'
 import AnalysisPanel from './components/analysis/AnalysisPanel.vue'
@@ -347,7 +348,7 @@ function onMySideChange(side: 'red' | 'black'): void {
   refreshAssist()
 }
 
-// AI（黑方）应招：搜索 → 规则层校验（长将/困毙拦截）→ 落子
+// AI（黑方）应招：搜索 → 规则层校验（长将自杀着法拦截）→ 落子
 // random_move：开启且回合 ≤12 时 MultiPV 3 搜索，从候选随机挑着（照抄 Android GameController）
 async function requestAiMove(): Promise<void> {
   if (aiThinking.value || game.value.isGameOver || !engineReady.value) return
@@ -362,11 +363,21 @@ async function requestAiMove(): Promise<void> {
 
   try {
     for (let attempt = 0; attempt < 3 && !accepted; attempt++) {
+      // UCI 没有「排除着法」指令：searchmoves 是「只搜这些」。
+      // 要排除被规则层拒绝的着法，必须传「全部合法着法 − excluded」。
+      // 无排除项时不传，让引擎自由搜索。
+      let searchmoves: string[] | undefined
+      if (excluded.length > 0) {
+        const allowed = allLegalMoves(g.currentBoard).filter((m) => !excluded.includes(m))
+        if (allowed.length === 0) break // 已无可选着法
+        searchmoves = allowed
+      }
+
       const collected: AnalysisLine[] = []
       let chosen: string
       if (useRandom) {
         const result = await engineAnalyze(
-          { fen, moves, depth: difficulty.value.depth, multipv: 3, excluded },
+          { fen, moves, depth: difficulty.value.depth, multipv: 3, searchmoves },
           (lines) => {
             collected.splice(0, collected.length, ...lines)
           },
@@ -375,7 +386,9 @@ async function requestAiMove(): Promise<void> {
           ? collected[Math.floor(Math.random() * collected.length)]!.pv[0] ?? result.move
           : result.move
       } else {
-        chosen = (await engineSearch({ fen, moves, depth: difficulty.value.depth, excluded })).move
+        chosen = (
+          await engineSearch({ fen, moves, depth: difficulty.value.depth, searchmoves })
+        ).move
       }
 
       // 搜索期间局面已变（新局/悔棋/用户走子）：丢弃结果
@@ -387,9 +400,14 @@ async function requestAiMove(): Promise<void> {
         continue
       }
       const state = g.movePiece(m.fromPosition, m.toPosition)
+      // 只拒绝「AI 自己吃亏/走不成」的着法：
+      //   PERPETUAL_CHECK —— 长将方判负，走这步等于自杀
+      //   ILLEGAL         —— 引擎给的着法规则层不认
+      // 注意 STALEMATE（困毙）**不在**其中：困毙判定查的是走完棋后轮到的一方，
+      // 即对方无着可走 → 对方判负 → AI 获胜（game.ts:219、statusText 同此口径）。
+      // CHECKMATE 同理，都是 AI 赢，直接落子。
       if (
         state.status === GameStatus.PERPETUAL_CHECK ||
-        state.status === GameStatus.STALEMATE ||
         state.status === GameStatus.ILLEGAL
       ) {
         // 规则层拒绝：撤销该着法，排除后重搜
