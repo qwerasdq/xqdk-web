@@ -2,6 +2,53 @@
 
 Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v2.0）。
 
+## 2026-10-10 — 排查 EdgeOne 部署「识别模型初始化失败」（鉴权 401 + 构建缺 ORT 资产）
+
+### 背景
+
+- 症状：在 EdgeOne 部署上测 JJ 支招，报
+  `识别模型初始化失败：no available backend found. ERR: [wasm] TypeError: Failed to fetch dynamically imported module:
+  https://xqdk-web-dpe2frj6gufy.edgeone.cool/ort/ort-wasm-simd-threaded.mjs`。
+  同一份代码在 Cloudflare Workers（`xqdk-web.2054488343.workers.dev`）完全正常。
+
+### 排查
+
+1. **先排除代码/产物问题**：本地 `dist/ort/` 两个文件（`.mjs` 20,856 B、`.wasm` 10.69 MiB）与报错请求的
+   文件名逐字一致；`src/vision/model.ts` 的 `wasmPaths` 由 `document.baseURI` 计算，子路径部署也兼容。
+   代码侧无问题。
+2. **真正拦路的是域名鉴权**：curl 与 Chromium（headless + headed，`executablePath` 指向 chromium-1243，
+   排除无头指纹因素）实测该域名，`/`、`/index.html`、`/ort/*`、`/models/*`、`/engine/pikafish.js`
+   **全部 401**，响应头 `X-EOP-MSG: eo_time missing`、`Server: edgeone makers`、`x-debug-has-cookie: false`，
+   响应体是腾讯 EdgeOne 错误页（`content-type: text/html`）。
+   → 该 URL 是**带签名的部署预览链接**，`eo_time` 签名只挂在导航 URL 上，页面自身发出的子资源请求
+   （模块动态 `import()`、fetch 模型/引擎）继承不到 → 收到 HTML 而非 JS → Chrome 报
+   `Failed to fetch dynamically imported module`。应用壳靠 Service Worker precache 照常显示，
+   所以现象是「页面能用，只有识别报错」。
+3. **顺带发现一个真实隐患**：`public/ort/` 被 `.gitignore` 忽略，靠 `npm ci` 的 `postinstall`
+   （`scripts/vision-assets.mjs` 从 node_modules 复制）生成，而 `edgeone.json` 的 `buildCommand`
+   里没有这一步。Cloudflare 侧碰巧因 install 阶段执行了 postinstall 而正常；一旦构建环境忽略
+   生命周期脚本，产物就缺 `ort/`，症状与本例相同（只是 401 变 404，再被 SPA rewrite 兜成 index.html）。
+
+### 本次交付
+
+| 文件 | 说明 |
+|---|---|
+| edgeone.json | `buildCommand` 改为 `node scripts/vision-assets.mjs && npx vitest run && npm run build && test -s dist/ort/ort-wasm-simd-threaded.wasm`：构建前显式生成 ORT 资产（不再依赖 postinstall 是否执行），并对产物做硬断言，缺资产直接构建失败而非静默上线 |
+| DEVLOG.md | 本条记录 |
+
+### 验证
+
+- 本地按新命令链逐段跑通：ORT 资产生成 OK → 120 个单测全过 → `vue-tsc` + `vite build` 全绿 → guard 通过；
+  `dist/ort/`、`dist/models/` 齐备。
+- 401 那条线本机无法自证（远端对匿名请求一律 401，拿不到 200 对照），需用户侧验证，见待办。
+
+### 遗留 / 待办
+
+- [ ] **确认 EdgeOne 的正式访问域名**：不要用控制台里带 `eo_time` 签名的部署预览链接；
+      无痕窗口（无 SW/无缓存）打开该链接，若整站 401 即证实鉴权问题，需改用正式域名或关闭预览环境访问控制
+- [ ] 换正式域名后重测 JJ 支招识别链路（本次改动只保证产物里有 ORT 资产）
+- [ ] 可选：把「ORT 资产存在性」断言也加进 Cloudflare 的构建命令（目前配置在 CF 控制台，仓库内无对应文件）
+
 ## 2026-10-07 — W6e：识别后端改为纯 WASM，移除 WebGPU 与整套恢复状态机
 
 ### 背景

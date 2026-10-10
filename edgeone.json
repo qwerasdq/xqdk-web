@@ -1,6 +1,6 @@
 {
   "installCommand": "npm ci",
-  "buildCommand": "npx vitest run && npm run build",
+  "buildCommand": "node scripts/vision-assets.mjs && npx vitest run && npm run build && test -s dist/ort/ort-wasm-simd-threaded.wasm",
   "outputDirectory": "./dist",
   "nodeVersion": "22.11.0",
   "rewrites": [
