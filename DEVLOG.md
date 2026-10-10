@@ -2,6 +2,56 @@
 
 Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v2.0）。
 
+## 2026-10-11 — 修复 EdgeOne 识别初始化失败的真实根因：.mjs 被当 octet-stream 返回
+
+### 背景
+
+- 承上条（2026-10-10）。用户实测：EdgeOne 页面**能正常打开**，构建日志里有 `==> ORT 资产就绪`，
+  但识别仍报 `Failed to fetch dynamically imported module: .../ort/ort-wasm-simd-threaded.mjs`。
+- 浏览器里直接 `fetch` 该 URL：**200，但 `content-type: application/octet-stream`**，内容确实是 glue
+  JS（`var ortWasmThreaded = ...`）；`.wasm` 则是正确的 `application/wasm`。
+
+### 根因
+
+- ORT 把 glue 当 **ES module 动态 import**。浏览器对模块脚本强制 MIME 检查，非 JS MIME 一律拒绝执行
+  （Chromium 报 `Failed to fetch dynamically imported module`，控制台另有一条
+  `Failed to load module script: Expected a JavaScript-or-Wasm module script but the server responded with
+  a MIME type of "application/octet-stream"`）。
+- **EdgeOne Pages 的 MIME 表不认识 `.mjs`**，回落到 octet-stream；Cloudflare 认识 `.mjs`，所以只有
+  EdgeOne 复现。上条怀疑的「产物缺失」「预览签名鉴权」都不是本例的成因（前者日志与 fetch 均证实文件在，
+  后者只影响匿名请求，用户浏览器带着签名凭据）。
+- 也就是说：**同一份代码在两个平台行为不同，差在托管的 MIME 表**——这类差异只能靠换掉有争议的扩展名
+  或显式指定 Content-Type 来消除。
+
+### 本次交付
+
+| 文件 | 说明 |
+|---|---|
+| scripts/vision-assets.mjs | glue 部署时改名 `ort-wasm-simd-threaded.mjs` → `.js`（`.js` 在所有托管上都映射 text/javascript）；`ASSETS` 改为 src→dst 映射；清理逻辑同步清掉旧 `.mjs` |
+| src/vision/model.ts | `setupOrt()` 的 `wasmPaths` 由目录前缀改为逐文件绝对 URL `{ mjs, wasm }`，指向改名后的 `.js` |
+| src/vision/model.test.ts | 新增 setupOrt 用例：断言两个 URL 且 glue 为 `.js` |
+| edgeone.json | 构建断言追加 `test -s dist/ort/ort-wasm-simd-threaded.js` |
+| scripts/deploy.sh、scripts/deploy-edgeone.sh | 产物校验增加 glue 文件（原先只查 wasm） |
+
+### 验证（本地模拟 EdgeOne 的 MIME 行为）
+
+- 写了一个临时静态服务器复刻 EdgeOne：`.mjs` → `application/octet-stream`、`.js` → `text/javascript`、
+  `.wasm` → `application/wasm`、未命中走 SPA fallback、带 COOP/COEP；用 Playwright + Chromium 实跑。
+- **A/B 对照**（同一份 glue 分别以两种 MIME 提供，页面内 `import()`）：
+  `.js(text/javascript)` → OK 可执行；`.mjs(octet-stream)` → 失败
+  `Failed to fetch dynamically imported module: .../__mime_probe.mjs`，与线上报错逐字一致。
+- **完整识别链路**（`?visionLab=1` → 开始推理）：status `ready (wasm)`，日志
+  `模型就绪：wasm，加载 444ms` / `识别后端 wasm，输出行数 25200`——改名后 ORT 正常加载 glue 与 wasm。
+- 改名安全性已核实：glue 内不含 `.mjs` 字样，线程 worker 用 `new Worker(new URL(import.meta.url))`，
+  不依赖自身文件名。
+- 121 个单测全过（新增 1）；`vue-tsc` + `vite build` 全绿；`dist/ort/` 只剩 `.js` + `.wasm`。
+
+### 遗留 / 待办
+
+- [ ] 部署后线上复测 JJ 支招识别；PWA runtime cache 里旧的 `.mjs` 响应不会再被请求，无需清缓存
+- [ ] 上条记录的「EdgeOne 预览链接需要签名」仍成立：正式访问要用不带 `eo_time` 的正式域名
+- [ ] 若以后仍有平台 MIME 差异，可用 `edgeone.json` 的 headers 段显式覆盖 Content-Type 兜底
+
 ## 2026-10-10 — 排查 EdgeOne 部署「识别模型初始化失败」（鉴权 401 + 构建缺 ORT 资产）
 
 ### 背景
@@ -16,14 +66,12 @@ Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v
 1. **先排除代码/产物问题**：本地 `dist/ort/` 两个文件（`.mjs` 20,856 B、`.wasm` 10.69 MiB）与报错请求的
    文件名逐字一致；`src/vision/model.ts` 的 `wasmPaths` 由 `document.baseURI` 计算，子路径部署也兼容。
    代码侧无问题。
-2. **真正拦路的是域名鉴权**：curl 与 Chromium（headless + headed，`executablePath` 指向 chromium-1243，
-   排除无头指纹因素）实测该域名，`/`、`/index.html`、`/ort/*`、`/models/*`、`/engine/pikafish.js`
-   **全部 401**，响应头 `X-EOP-MSG: eo_time missing`、`Server: edgeone makers`、`x-debug-has-cookie: false`，
-   响应体是腾讯 EdgeOne 错误页（`content-type: text/html`）。
-   → 该 URL 是**带签名的部署预览链接**，`eo_time` 签名只挂在导航 URL 上，页面自身发出的子资源请求
-   （模块动态 `import()`、fetch 模型/引擎）继承不到 → 收到 HTML 而非 JS → Chrome 报
-   `Failed to fetch dynamically imported module`。应用壳靠 Service Worker precache 照常显示，
-   所以现象是「页面能用，只有识别报错」。
+2. **怀疑域名鉴权（后被推翻，见 2026-10-11 条）**：curl 与 Chromium（headless + headed，
+   `executablePath` 指向 chromium-1243，排除无头指纹因素）实测该域名，`/`、`/index.html`、`/ort/*`、
+   `/models/*`、`/engine/pikafish.js` **全部 401**，响应头 `X-EOP-MSG: eo_time missing`、
+   `Server: edgeone makers`、`x-debug-has-cookie: false`，响应体是腾讯 EdgeOne 错误页。
+   → 推断为「带签名的部署预览链接，子资源请求继承不到签名」。该鉴权确实存在（对匿名请求成立），
+   但**不是本例成因**：用户浏览器带着凭据，页面正常打开，子资源请求是通的。
 3. **顺带发现一个真实隐患**：`public/ort/` 被 `.gitignore` 忽略，靠 `npm ci` 的 `postinstall`
    （`scripts/vision-assets.mjs` 从 node_modules 复制）生成，而 `edgeone.json` 的 `buildCommand`
    里没有这一步。Cloudflare 侧碰巧因 install 阶段执行了 postinstall 而正常；一旦构建环境忽略
@@ -44,10 +92,15 @@ Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v
 
 ### 遗留 / 待办
 
-- [ ] **确认 EdgeOne 的正式访问域名**：不要用控制台里带 `eo_time` 签名的部署预览链接；
-      无痕窗口（无 SW/无缓存）打开该链接，若整站 401 即证实鉴权问题，需改用正式域名或关闭预览环境访问控制
-- [ ] 换正式域名后重测 JJ 支招识别链路（本次改动只保证产物里有 ORT 资产）
+- [ ] **确认 EdgeOne 的正式访问域名**：不要用控制台里带 `eo_time` 签名的部署预览链接
+- [x] 换正式域名后重测 JJ 支招识别链路 → 2026-10-11：换域名后仍报错，真实根因是 `.mjs` MIME，见上条
 - [ ] 可选：把「ORT 资产存在性」断言也加进 Cloudflare 的构建命令（目前配置在 CF 控制台，仓库内无对应文件）
+
+### 2026-10-11 复查
+
+- 本条对成因的判断有偏差：产物没缺（EdgeOne 构建日志有 `==> ORT 资产就绪`，用户浏览器里 fetch 该 URL 得 200），
+  鉴权也不是本例成因。**真实根因是 EdgeOne 对 `.mjs` 返回 `application/octet-stream`**，见上条 2026-10-11。
+- 仍然成立的部分：`edgeone.json` 缺「构建前生成 ORT 资产」这一步是真隐患，本次一并保留；域名签名鉴权也真实存在。
 
 ## 2026-10-07 — W6e：识别后端改为纯 WASM，移除 WebGPU 与整套恢复状态机
 

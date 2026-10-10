@@ -1,6 +1,18 @@
 // model.ts 推理逻辑：输出拷贝、缺张量报错、超时兜底（后端挂起时 run() 不会 reject）
 import { describe, expect, it } from 'vitest'
-import { InferenceTimeoutError, runModel, withTimeout, type ModelSession } from './model'
+import * as ort from 'onnxruntime-web/wasm'
+import { InferenceTimeoutError, runModel, setupOrt, withTimeout, type ModelSession } from './model'
+
+describe('setupOrt', () => {
+  it('glue 与 wasm 用显式绝对 URL，glue 是 .js 而非 .mjs', () => {
+    // .mjs 在 EdgeOne 上被当 application/octet-stream 返回，模块加载直接失败（见 setupOrt 注释）
+    setupOrt('https://example.com/ort/')
+    expect(ort.env.wasm.wasmPaths).toEqual({
+      mjs: 'https://example.com/ort/ort-wasm-simd-threaded.js',
+      wasm: 'https://example.com/ort/ort-wasm-simd-threaded.wasm',
+    })
+  })
+})
 
 describe('withTimeout', () => {
   it('正常完成时透传结果', async () => {

@@ -47,6 +47,7 @@ echo "    pikafish.js / .wasm / .data 齐备"
 # scripts/vision-assets.mjs 从 node_modules 生成，不入 git（见 .gitignore）。
 echo "==> 检查识别资产"
 [ -f "public/models/xq-yolo-640.onnx" ] || { echo "[x] 缺少 public/models/xq-yolo-640.onnx（来源见 public/models/README.md）"; exit 1; }
+[ -f "public/ort/ort-wasm-simd-threaded.js" ] || { echo "[x] 缺少 ORT glue —— 先执行: node scripts/vision-assets.mjs"; exit 1; }
 [ -f "public/ort/ort-wasm-simd-threaded.wasm" ] || { echo "[x] 缺少 ORT wasm —— 先执行: node scripts/vision-assets.mjs"; exit 1; }
 ORT_SIZE="$(stat -c %s public/ort/ort-wasm-simd-threaded.wasm 2>/dev/null || stat -f %z public/ort/ort-wasm-simd-threaded.wasm)"
 if [ "$ORT_SIZE" -gt $((25 * 1024 * 1024)) ]; then
@@ -74,6 +75,7 @@ for f in pikafish.js pikafish.wasm pikafish.data; do
   [ -f "dist/engine/$f" ] || { echo "[x] dist/engine/$f 缺失"; exit 1; }
 done
 [ -f "dist/models/xq-yolo-640.onnx" ] || { echo "[x] dist/models/xq-yolo-640.onnx 缺失"; exit 1; }
+[ -f "dist/ort/ort-wasm-simd-threaded.js" ] || { echo "[x] dist/ort/glue 缺失（运行 node scripts/vision-assets.mjs）"; exit 1; }
 [ -f "dist/ort/ort-wasm-simd-threaded.wasm" ] || { echo "[x] dist/ort/wasm 缺失（运行 node scripts/vision-assets.mjs）"; exit 1; }
 SIZE="$(du -sh dist | cut -f1)"
 echo "    产物 OK（index.html / _headers(COOP+COEP) / engine×3 / models / ort，共 $SIZE）"

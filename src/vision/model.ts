@@ -35,7 +35,14 @@ let envReady = false
 /** 全局 ort 环境配置（幂等） */
 export function setupOrt(ortDir: string): void {
   if (envReady) return
-  ort.env.wasm.wasmPaths = ortDir
+  // 必须逐文件指定绝对 URL，不能用目录前缀：前缀形式下 ORT 会去取 `ort-wasm-simd-threaded.mjs`，
+  // 而 EdgeOne Pages 不认识 .mjs，按 application/octet-stream 返回，浏览器拒绝执行非 JS MIME 的
+  // 模块脚本 → "Failed to fetch dynamically imported module"（Cloudflare 的 MIME 表认识 .mjs 才没事）。
+  // 故构建期把 glue 改名成 .js（见 scripts/vision-assets.mjs），这里显式指向两个文件。
+  ort.env.wasm.wasmPaths = {
+    mjs: `${ortDir}ort-wasm-simd-threaded.js`,
+    wasm: `${ortDir}ort-wasm-simd-threaded.wasm`,
+  }
   // threaded wasm 需 SharedArrayBuffer（COOP/COEP 已由部署响应头提供）；
   // 未隔离时显式降到单线程，避免 ort 内部警告与潜在失败
   const isolated = typeof self !== 'undefined' && (self as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated === true
