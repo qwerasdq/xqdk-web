@@ -2,7 +2,14 @@
 // 搜索队列在 Worker 内维护（pendingFen/stop 模式，照抄 AnalysisEngine.kt）
 
 import { ref, shallowRef } from 'vue'
-import { parseInfoLine, parseBestmoveLine, toRedScore, wdlToWinRate, cpToWinRate } from './uci'
+import {
+  parseInfoLine,
+  parseBestmoveLine,
+  sideToMoveAfter,
+  toRedScore,
+  wdlToWinRate,
+  cpToWinRate,
+} from './uci'
 import type { EngineInfo, EngineScore, BestmoveResult } from './uci'
 import { workerSource } from './worker'
 import { createAnalysisCache, makeAnalysisCacheKey } from './analysisCache'
@@ -11,7 +18,9 @@ import type { AnalysisCacheEntry } from './analysisCache'
 export type EngineStatus = 'idle' | 'loading' | 'ready' | 'error'
 
 export interface SearchRequest {
+  /** 起始局面（不是当前局面） */
   fen: string
+  /** 起始局面之后的完整着法历史（UCCI），由引擎按顺序应用 */
   moves: string[]
   depth?: number
   movetime?: number
@@ -264,7 +273,8 @@ export async function engineAnalyze(
 ): Promise<BestmoveResult> {
   await waitReady()
   const multipv = req.multipv ?? 3
-  const sideToMove = req.fen.split(' ')[1] === 'b' ? 'b' : 'w'
+  // 起始局面 + 历史着法 → 引擎实际搜索局面的走子方（不能直接读 req.fen 的 side）
+  const sideToMove = sideToMoveAfter(req.fen, req.moves)
 
   const cacheKey = makeAnalysisCacheKey({ ...req, multipv })
   const cached = analysisCache.get(cacheKey)

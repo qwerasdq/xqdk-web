@@ -85,6 +85,20 @@ export function parseBestmoveLine(line: string): BestmoveResult | null {
 }
 
 /**
+ * 引擎实际搜索的那个局面的走子方。
+ *
+ * 调用方给的是 `position fen <fen> moves <moves...>` 的起始局面 + 完整历史
+ * （见 SearchRequest），着法由引擎自己应用；走子方因此 = 起始局的 side 按着法数
+ * 奇偶翻转。直接读 `fen` 的 side 字段会在奇数着法后判反，
+ * 导致红方视角的评分/胜率整体颠倒。
+ */
+export function sideToMoveAfter(fen: string, moves: readonly string[]): SideToMove {
+  const base: SideToMove = fen.split(' ')[1] === 'b' ? 'b' : 'w'
+  if (moves.length % 2 === 0) return base
+  return base === 'w' ? 'b' : 'w'
+}
+
+/**
  * 红方视角评分换算（照抄 AnalysisModels.kt）：
  * 引擎 score 是"走子方视角"（即 FEN side-to-move 一方），
  * UI 统一红方视角：side 为黑时 cp 取反、mate 符号翻转
