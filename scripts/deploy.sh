@@ -43,7 +43,7 @@ done
 echo "    pikafish.js / .wasm / .data 齐备"
 
 # ---- 1b. 识别模型与 ORT 运行时检查（W6b）----
-# 模型 xq-yolo-640.onnx 已入库（SHA256 见 scripts/vision.sha256）；ORT 运行时由
+# 模型 xq-yolo-640.onnx 已入库（SHA256 见 public/models/README.md）；ORT 运行时由
 # scripts/vision-assets.mjs 从 node_modules 生成，不入 git（见 .gitignore）。
 echo "==> 检查识别资产"
 [ -f "public/models/xq-yolo-640.onnx" ] || { echo "[x] 缺少 public/models/xq-yolo-640.onnx（来源见 public/models/README.md）"; exit 1; }

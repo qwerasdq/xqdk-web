@@ -12,7 +12,9 @@
     "vision:assets": "node scripts/vision-assets.mjs",
     "postinstall": "node scripts/vision-assets.mjs",
     "deploy": "bash scripts/deploy.sh",
-    "deploy:check": "bash scripts/deploy.sh --check"
+    "deploy:check": "bash scripts/deploy.sh --check",
+    "deploy:edgeone": "bash scripts/deploy-edgeone.sh",
+    "deploy:edgeone:check": "bash scripts/deploy-edgeone.sh --check"
   },
   "dependencies": {
     "onnxruntime-web": "~1.22.0",
