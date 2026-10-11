@@ -27,7 +27,10 @@ export interface BuildPlansRequest {
   fen: string
   /** 历史着法（UCCI），作用于起始 FEN 之上 */
   moves: string[]
-  depth: number
+  /** 对方候选搜索毫秒数（时间受限，保证响应速度） */
+  oppMovetime: number
+  /** 我方应手搜索毫秒数（可短于对方候选，让第一条预案更快） */
+  myMovetime: number
   /** 对方候选数（建议 3） */
   topN: number
 }
@@ -45,11 +48,11 @@ function applyUcci(board: Board, ucci: string): boolean {
 function analyzeOnce(
   fen: string,
   moves: string[],
-  depth: number,
+  movetime: number,
   multipv: number,
 ): Promise<AnalysisLine[]> {
   let final: AnalysisLine[] = []
-  return engineAnalyze({ fen, moves, depth, multipv }, (lines) => {
+  return engineAnalyze({ fen, moves, movetime, multipv }, (lines) => {
     final = lines
   }).then(() => final)
 }
@@ -67,7 +70,7 @@ export async function buildPlans(
   const topN = Math.max(1, Math.min(3, req.topN))
 
   // 1. 对方怎么走：当前局面（轮对方）MultiPV topN
-  const oppLines = await analyzeOnce(req.fen, req.moves, req.depth, topN)
+  const oppLines = await analyzeOnce(req.fen, req.moves, req.oppMovetime, topN)
   if (isStale()) return
 
   // 2. 逐个候选求我方应对
@@ -94,8 +97,9 @@ export async function buildPlans(
     if (!applyUcci(board, oppUcci)) continue
     const afterFen = board.toFENString()
 
-    // 3. 我方应对（单线搜索足够——预案展示只需最佳应手）
-    const myLines = await analyzeOnce(afterFen, [], req.depth, 1)
+    // 3. 我方应对（单线搜索足够——预案展示只需最佳应手）。
+    //    时间限短于对方候选，让第一条预案更快出来。
+    const myLines = await analyzeOnce(afterFen, [], req.myMovetime, 1)
     if (isStale()) return
     const myUcci = myLines[0]?.pv[0]
     if (!myUcci) continue

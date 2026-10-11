@@ -312,7 +312,10 @@ async function runPlans(token: number): Promise<void> {
       {
         fen: g.startFen,
         moves: g.history.map((h) => h.ucciString),
-        depth: difficulty.value.depth,
+        // 预案按时间来算，而不是固定深度：保证对方回合不会无限长考。
+        // 难度仍由 Skill Level 控制（onDifficultyChange 已设置），深度不再成为瓶颈。
+        oppMovetime: 2500,
+        myMovetime: 1500,
         topN: 3,
       },
       (plan) => {
