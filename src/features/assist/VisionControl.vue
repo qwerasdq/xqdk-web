@@ -17,6 +17,7 @@ export interface FrameDiag {
   candidateFrames: number
   frameW: number
   frameH: number
+  cellsStable: boolean
 }
 
 const props = defineProps<{
@@ -69,7 +70,10 @@ const diagText = computed(() => {
   const parts: string[] = []
   parts.push(d.pieceCount !== null ? `识别到 ${d.pieceCount} 子` : `检测 ${d.detections} 框`)
   if (d.issues.length) parts.push(`校验失败：${d.issues.join('、')}`)
-  else if (d.pieceCount !== null) parts.push(`稳定 ${Math.min(d.candidateFrames, 3)}/3 帧`)
+  else if (d.pieceCount !== null) {
+    parts.push(`稳定 ${Math.min(d.candidateFrames, 3)}/3 帧`)
+    parts.push(`去抖 ${d.cellsStable ? '已收敛' : '有变化'}`)
+  }
   return parts.join(' · ')
 })
 </script>

@@ -12,6 +12,7 @@ export class BoardTracker {
   redGo = true
   /** 连续未确认帧数（用于提示） */
   unstableStreak = 0
+
   /** 最近一次确认新局面的移动方（由前后局面 diff 推断；非 NEW_BOARD 时为 null） */
   lastMovedSide: 'red' | 'black' | null = null
 
@@ -23,7 +24,7 @@ export class BoardTracker {
     return this.candidateHits
   }
 
-  /** 最近一次“确认新局”后，主线程返回的处理结果 */
+  /** 最近一次“确认新局”后的应用/丢弃标记（已被 onFrame 消费） */
   private ackedApplied: Uint8Array | null = null
   private ackedDiscarded: Uint8Array | null = null
 

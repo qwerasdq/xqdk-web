@@ -74,15 +74,15 @@ describe('reconcileGame', () => {
     expect(g.currentBoard.bRedGo).toBe(true) // Game 历史仍是红先走完两步
   })
 
-  it('无法匹配时 reload 为识别局面', () => {
+  it('无法匹配时 blocked，不自动改盘（防止识别错覆盖）', () => {
     const g = new Game()
     // 直接构造一个无法由开局 1-2 步到达的局面：帅移位到 e2
     const weird = canonicalStart().slice()
     weird[4 * 9 + 4] = weird[9 * 9 + 4]!
     weird[9 * 9 + 4] = 0
     const r = reconcileGame(g, mappedOf(weird), false)
-    expect(r.applied).toBe('reload')
-    expect(g.currentBoard.getPieceByXY(4, 4)).toBe(1) // WSHUAI
+    expect(r.applied).toBe('blocked')
+    expect(g.currentBoard.getPieceByXY(4, 4)).toBe(0) // 未重载，原帅仍在底线
     expect(g.history.length).toBe(0)
   })
 
@@ -95,13 +95,13 @@ describe('reconcileGame', () => {
     expect(g.currentBoard.bRedGo).toBe(true)
   })
 
-  it('planSync 对 reload 不改变 Game，需确认后再应用', () => {
+  it('planSync 对 blocked 不改变 Game，需确认后再应用', () => {
     const g = new Game()
     const weird = canonicalStart().slice()
     weird[4 * 9 + 4] = weird[9 * 9 + 4]!
     weird[9 * 9 + 4] = 0
     const plan = planSync(g, mappedOf(weird), false)
-    expect(plan.kind).toBe('reload')
+    expect(plan.kind).toBe('blocked')
     expect(plan.fen).toBeTruthy()
     expect(g.history.length).toBe(0)
     expect(g.currentBoard.piece[9]![4]).toBe(1) // 未重载，原帅仍在底线

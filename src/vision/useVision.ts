@@ -40,6 +40,7 @@ export interface VisionStateObject {
     candidateFrames: number
     frameW: number
     frameH: number
+    cellsStable: boolean
   } | null
 }
 
@@ -130,6 +131,7 @@ export function useVision(modelUrl: string, ortDir: string, handlers: VisionHand
           candidateFrames: msg.candidateFrames,
           frameW: msg.frameW,
           frameH: msg.frameH,
+          cellsStable: msg.cellsStable,
         }
         handlers.onFrame?.(msg.event, msg.mapped, msg.movedSide, msg.redGo)
         break

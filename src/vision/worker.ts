@@ -12,9 +12,10 @@
 
 declare const self: DedicatedWorkerGlobalScope
 
-import { validate } from './assistBoard'
+import { equal, validate } from './assistBoard'
 import { BoardTracker } from './boardTracker'
 import { map } from './boardMapper'
+import { CellStabilizer } from './cellStabilizer'
 import { createSession, runModel, type ModelSession } from './model'
 import { decode } from './postprocess'
 import { preprocess } from './preprocess'
@@ -22,12 +23,15 @@ import type { FromVisionWorker, MappedBoard, RecognitionResult, ToVisionWorker }
 import { CELLS } from './types'
 
 const CONFIRM_FRAMES = 3
+/** 逐格去抖帧数：连续 2 帧一致才采纳该格变化（吸收走子高亮/动画/相邻格跳变造成的单帧抖动） */
+const STABILIZE_FRAMES = 2
 
 let model: ModelSession | null = null
 let busy = false
 let disposed = false
 let initStarted = false
 const tracker = new BoardTracker(CONFIRM_FRAMES)
+const stabilizer = new CellStabilizer(CELLS, STABILIZE_FRAMES)
 
 function post(msg: FromVisionWorker): void {
   self.postMessage(msg)
@@ -51,9 +55,9 @@ function invalidResult(reason: string, count: number): RecognitionResult {
   }
 }
 
-function toRecognition(mapped: MappedBoard): RecognitionResult {
+function toRecognition(mapped: MappedBoard, canonicalOverride?: Uint8Array): RecognitionResult {
   return {
-    canonical: mapped.canonical,
+    canonical: canonicalOverride ?? mapped.canonical,
     screenRaw: mapped.screenRaw,
     cellScores: mapped.cellScores,
     orientation: mapped.orientation,
@@ -88,19 +92,20 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
   const { id, bitmap, frameW, frameH } = msg
   if (model === null) {
     bitmap.close()
-    post({ type: 'frame-result', id, error: '模型未加载', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, timings: { pre: 0, infer: 0, post: 0 } })
+    post({ type: 'frame-result', id, error: '模型未加载', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, timings: { pre: 0, infer: 0, post: 0 } })
     return
   }
   if (busy) {
     // 上一帧还在推理：丢弃本帧（主线程按节流发送，堆积说明推理慢于抽帧）
     bitmap.close()
-    post({ type: 'frame-result', id, error: 'busy', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, timings: { pre: 0, infer: 0, post: 0 } })
+    post({ type: 'frame-result', id, error: 'busy', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, timings: { pre: 0, infer: 0, post: 0 } })
     return
   }
   busy = true
   let mapped: MappedBoard | null = null
   let detCount = 0
   let result = invalidResult('识别失败', 0)
+  let cellsStable = false
   const t = { pre: 0, infer: 0, post: 0 }
   try {
     const t0 = performance.now()
@@ -115,7 +120,13 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     t.pre = Math.round(t1 - t0)
     t.infer = Math.round(t2 - t1)
     t.post = Math.round(t3 - t2)
-    result = mapped === null ? invalidResult('未识别到棋盘', detCount) : toRecognition(mapped)
+    if (mapped === null) {
+      result = invalidResult('未识别到棋盘', detCount)
+    } else {
+      const stable = stabilizer.update(mapped.canonical)
+      cellsStable = equal(stable, mapped.canonical)
+      result = toRecognition(mapped, stable)
+    }
   } catch (e) {
     result = invalidResult(e instanceof Error ? e.message : String(e), detCount)
   } finally {
@@ -140,6 +151,7 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     candidateFrames: tracker.candidateFrames,
     frameW,
     frameH,
+    cellsStable,
     timings: t,
   })
 }
@@ -155,6 +167,7 @@ self.onmessage = (e: MessageEvent<ToVisionWorker>): void => {
       break
     case 'reset':
       tracker.reset()
+      stabilizer.reset()
       break
     case 'ack-decision':
       // 对最新一帧已确认 canonical 做决策；stale canonical 由 tracker internally 判断
@@ -165,6 +178,7 @@ self.onmessage = (e: MessageEvent<ToVisionWorker>): void => {
       void model?.session.release()
       model = null
       tracker.reset()
+      stabilizer.reset()
       break
   }
 }

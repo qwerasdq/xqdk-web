@@ -17,14 +17,14 @@ import type { MappedBoard } from './types'
 import { BOARD_H, BOARD_W, CELLS } from './types'
 
 export interface SyncPlan {
-  kind: 'noop' | 'move' | 'reload'
+  kind: 'noop' | 'move' | 'blocked' | 'reload'
   path?: SearchStep[]
   fen?: string
   reason?: string
 }
 
 export interface Reconciled {
-  /** 应用方式：move = 用合法着法走（历史保留）；reload = 直接换棋盘；noop = 没变化 */
+  /** 应用方式：move = 用合法着法走（历史保留）；reload = 已直接换棋盘；blocked = 待人工确认；noop = 没变化 */
   applied: SyncPlan['kind']
   fen?: string
   move?: { from: Position; to: Position }
@@ -119,7 +119,11 @@ export function findSyncPath(g: SyncGame, target: Uint8Array, maxPlies = 2): Sea
 }
 
 /**
- * 计算调和计划：move = 找到合法走法路径（未实际执行）；reload = 需要直接换盘；noop = 没变化。
+ * 计算调和计划：
+ * - noop = 没变化/长度异常；
+ * - move = 找到合法走法路径（未实际执行）；
+ * - blocked = 无法用合法走法到达，不应自动改盘，需人工确认；
+ * - reload = 仅用于 reconcileGame 内部异常时（合法路径执行失败），主线程仍需按 blocked 处理。
  */
 export function planSync(g: SyncGame, mapped: MappedBoard, redGo: boolean): SyncPlan {
   const canonical = mapped.canonical
@@ -131,29 +135,31 @@ export function planSync(g: SyncGame, mapped: MappedBoard, redGo: boolean): Sync
   const path = findSyncPath(g, canonical, 2)
   if (path) return { kind: 'move', path }
 
+  // 不再自动 reload：识别结果不能由当前局面合法到达时，需要人工确认，避免单帧/连续错检直接覆盖盘面。
   const fen = toFen(canonical, redGo)
   if (!fen) return { kind: 'noop', reason: 'FEN 生成失败' }
-  return { kind: 'reload', fen, reason: '无法用合法走法到达' }
+  return { kind: 'blocked', fen, reason: '无法用合法走法到达' }
 }
 
 /**
- * 调和：返回应用方式。move 路径已实际执行到 Game；reload 已通过 restoreFromFEN 重载。
+ * 调和：返回应用方式。
+ * move = 路径已实际执行到 Game；blocked = 不应用，等待人工确认；noop = 没变化。
+ * 不再自动执行 reload：reload 会清空历史且可能把识别错结果直接上盘，JJ 场景必须先人工确认。
  */
 export function reconcileGame(g: SyncGame, mapped: MappedBoard, redGo: boolean): Reconciled {
   const plan = planSync(g, mapped, redGo)
-  if (plan.kind === 'noop') return { applied: 'noop', reason: plan.reason }
+  if (plan.kind === 'noop' || plan.kind === 'blocked') return { applied: plan.kind, fen: plan.fen, reason: plan.reason }
 
   if (plan.kind === 'move') {
     for (const m of plan.path ?? []) {
       const st = g.movePiece(m.from, m.to)
       if (st.status === GameStatus.ILLEGAL) {
-        return { applied: 'reload', fen: plan.fen, reason: '路径含非法着法' }
+        return { applied: 'blocked', fen: plan.fen, reason: '路径含非法着法' }
       }
     }
     const last = plan.path?.[plan.path.length - 1]
     return { applied: 'move', move: last ? { from: last.from, to: last.to } : undefined }
   }
 
-  if (plan.fen && g.restoreFromFEN(plan.fen)) return { applied: 'reload', fen: plan.fen }
-  return { applied: 'noop', reason: plan.reason || 'FEN 重载失败' }
+  return { applied: 'noop', reason: plan.reason || '未知计划' }
 }

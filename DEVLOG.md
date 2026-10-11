@@ -2,6 +2,44 @@
 
 Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v2.0）。
 
+## 2026-10-11 — JJ/Android 识别不稳定与误识别：逐格去抖 + 禁止自动掉盘
+
+### 根因
+
+- 用户实测 JJ 支招“经常识别不稳定、识别错”，且 Android 端同样出现，说明问题不在 Web 移植，而在
+  共用的识别跟踪逻辑。
+- 当前 `BoardTracker` 用“整盘逐格完全一致连续 3 帧”做确认：
+  1. 任一格瞬时抖动（走子高亮环、动画、检测框相邻格跳变、UI 偶发误检）都会让整盘判定 UNSTABLE，
+     候选计数被重置 → “识别不稳定”；
+  2. 同一个误检连续 3 帧出现时，又会被当成新局面确认 → “识别错”。
+- 另外 `sync.ts` 对“无法用合法走法到达”的局面会自动 reload（重载 FEN），等于把识别错直接覆盖到
+  Game 盘面，且会清空历史。
+
+### 本次交付
+
+| 文件 | 说明 |
+|---|---|
+| src/vision/cellStabilizer.ts | 新增逐格时间去抖：同一格连续 2 帧一致才采纳该格变化。吸收单帧高亮/动画/相邻格跳变，同时不引入棋子/棋规知识 |
+| src/vision/worker.ts | canonical 映射结果先过 CellStabilizer 再进 BoardTracker；reset/dispose 同步清稳定器 |
+| src/vision/types.ts | frame-result 增加 `cellsStable` 诊断（原始/去抖是否一致） |
+| src/vision/useVision.ts | 透传 `cellsStable` 到 UI 诊断 |
+| src/features/assist/VisionControl.vue | 诊断行增加“去抖：已收敛/有变化” |
+| src/vision/sync.ts | `planSync` 无法合法到达时返回 `blocked`（保留 FEN，但**不自动 reload**）；`reconcileGame` 不再直接改盘 |
+| src/vision/sync.test.ts | 更新 blocked 行为测试：不自动改盘 |
+| src/App.vue | blocked 统一进待确认；已有 pending 时 ack 新快照、不覆盖，避免每 3 帧弹窗轰炸 |
+
+### 验证
+
+- `vue-tsc --noEmit` 全绿。
+- `npx vitest run` 全 129 个测试通过（新增 8 个 CellStabilizer 用例，更新 sync 语义用例）。
+
+### 遗留
+
+- 合法着法硬校验目前只在主线程 `planSync` 做；worker 内 tracker 仍可能连续确认错局并发给主线程，
+  主线程靠 blocked + 人工确认兜底。后续可把“候选不过出、由主线程决定是否回传”做成主动闭环。
+- Android 端仍需按同样语义回填：Android 的 tracker/sync 是同一套思路，但本仓库只改 Web；如需两个端
+  同修，应把 `CellStabilizer` 语义同步到 Android `RecognitionTypes.kt`。
+
 ## 2026-10-11 — 修复 EdgeOne 识别初始化失败的真实根因：.mjs 被当 octet-stream 返回
 
 ### 背景

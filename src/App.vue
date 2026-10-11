@@ -94,7 +94,7 @@ const ORT_DIR = new URL(import.meta.env.BASE_URL + 'ort/', location.href).href
 
 const pendingVision = ref<{
   event: TrackerEvent
-  plan: SyncPlan & { kind: 'reload' }
+  plan: SyncPlan & { kind: 'blocked' }
   mapped: MappedBoard
   redGo: boolean
 } | null>(null)
@@ -123,10 +123,10 @@ const vision = useVision(MODEL_URL, ORT_DIR, {
       for (const step of plan.path ?? []) {
         const st = g.movePiece(step.from, step.to)
         if (st.status === GameStatus.ILLEGAL) {
-          // 理论上 planSync 已过滤，异常时进入待确认 reload
+          // 理论上 planSync 已过滤，异常时进入待确认 blocked
           pendingVision.value = {
             event,
-            plan: { kind: 'reload', fen: plan.fen ?? '', reason: '合法路径执行失败' },
+            plan: { kind: 'blocked', fen: plan.fen ?? '', reason: '合法路径执行失败' },
             mapped,
             redGo,
           }
@@ -138,12 +138,16 @@ const vision = useVision(MODEL_URL, ORT_DIR, {
       if (g.isGameOver) status.value = g.updateGameStatus().status
       else if (isAssist.value && !g.isGameOver) refreshAssist()
       vision.ackDecision('apply', mapped.canonical)
-    } else if (plan.kind === 'reload') {
-      // 无法用合法走法到达：不直接改盘，等待用户确认
-      if (pendingVision.value) vision.ackDecision('discard', pendingVision.value.mapped.canonical)
+    } else if (plan.kind === 'blocked') {
+      // 无法用合法走法到达：不直接改盘，等待用户确认。
+      // 已有待确认时保留第一个（并 ack 掉新快照，避免 tracker 每 3 帧重复提示造成弹窗轰炸）。
+      if (pendingVision.value) {
+        vision.ackDecision('discard', mapped.canonical)
+        return
+      }
       pendingVision.value = {
         event,
-        plan: { kind: 'reload', fen: plan.fen ?? '', reason: plan.reason ?? '需手动确认同步' },
+        plan: { kind: 'blocked', fen: plan.fen ?? '', reason: plan.reason ?? '需手动确认同步' },
         mapped,
         redGo,
       }

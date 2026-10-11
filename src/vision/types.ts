@@ -112,6 +112,8 @@ export type FromVisionWorker =
       /** 诊断用：抽帧尺寸 */
       frameW: number
       frameH: number
+      /** 诊断用：此帧原始映射与去抖前的逐格一致性（true=无单格抖动） */
+      cellsStable: boolean
       timings: { pre: number; infer: number; post: number }
     }
   | { type: 'log'; text: string }

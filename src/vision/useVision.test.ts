@@ -150,6 +150,7 @@ describe('useVision', () => {
       candidateFrames: 0,
       frameW: 1280,
       frameH: 720,
+      cellsStable: false,
       timings: { pre: 1, infer: 2, post: 3 },
     })
     expect(vision.state.unstableStreak).toBe(7)
@@ -160,6 +161,7 @@ describe('useVision', () => {
       candidateFrames: 0,
       frameW: 1280,
       frameH: 720,
+      cellsStable: false,
     })
   })
 
