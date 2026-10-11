@@ -145,4 +145,29 @@ describe('检测 → 棋盘映射', () => {
     expect(mapped).not.toBeNull()
     expect(equal(canonicalStart(), mapped!.canonical)).toBe(true)
   })
+
+  it('gridOverride 用锁定网格替代当帧棋盘框（裁剪帧框漂移不影响归属）', () => {
+    const dets = startDetections(false)
+    const ref = map(dets, FRAME_W, FRAME_H)!
+    expect(equal(canonicalStart(), ref.canonical)).toBe(true)
+
+    // 模拟裁剪帧的棋盘框漂移：框整体上移 0.5 格（裁剪构图下模型框中心/高度会变），
+    // 行号随之整体减 0.5，最底行 round 到上一行 —— 即"最底下的棋子整体上移一行"。
+    const gridH = 9 * CELL_H
+    const shifted = new YoloDetection(
+      LABEL_BOARD, 0.95,
+      boardDet.cx, boardDet.cy - 0.5 * gridH, boardDet.w, boardDet.h,
+    )
+    const pieces = dets.filter((d) => !d.isBoard)
+
+    // 不加锁定：最底行整行丢失（复现错位）
+    const withoutLock = map([...pieces, shifted], FRAME_W, FRAME_H)!
+    expect(equal(canonicalStart(), withoutLock.canonical)).toBe(false)
+    expect(withoutLock.canonical[at(4, 9)]).toBe(Piece.EMPTY)
+
+    // 加锁定：沿用整帧锚点，结果与基准逐格一致
+    const withLock = map([...pieces, shifted], FRAME_W, FRAME_H, 3, ref.grid)!
+    expect(equal(canonicalStart(), withLock.canonical)).toBe(true)
+    expect(withLock.pieceCount).toBe(32)
+  })
 })

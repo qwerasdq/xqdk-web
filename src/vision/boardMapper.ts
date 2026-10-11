@@ -8,12 +8,15 @@ import { BOARD_H, BOARD_W, CELLS } from './types'
 
 /**
  * @param minPieces 单帧最少棋子检测数：残局可低至 3 子（帅仕 vs 将），结构合法性交给 validate/tracker
+ * @param gridOverride 锁定网格（归一化帧坐标）：裁剪帧的棋盘框会因构图变化而漂移，
+ *   传入整帧定位得到的锚点可让格子归属保持稳定；为 null 时按当帧检出的棋盘框定位。
  */
 export function map(
   dets: YoloDetection[],
   frameW: number,
   frameH: number,
   minPieces = 3,
+  gridOverride: BoardGridRect | null = null,
 ): MappedBoard | null {
   const pieces = dets.filter((d) => !d.isBoard)
   if (pieces.length < minPieces) return null
@@ -27,7 +30,13 @@ export function map(
 
   let bx0 = 0, by0 = 0, bx1 = 0, by1 = 0
   let anchored = false
-  if (boardDet) {
+  if (gridOverride) {
+    bx0 = gridOverride.nx0 * frameW
+    by0 = gridOverride.ny0 * frameH
+    bx1 = gridOverride.nx1 * frameW
+    by1 = gridOverride.ny1 * frameH
+    anchored = true
+  } else if (boardDet) {
     const x0 = boardDet.cx - boardDet.w / 2
     const y0 = boardDet.cy - boardDet.h / 2
     const x1 = boardDet.cx + boardDet.w / 2

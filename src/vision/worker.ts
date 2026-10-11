@@ -18,13 +18,15 @@ import { map } from './boardMapper'
 import { CellStabilizer } from './cellStabilizer'
 import { createSession, runModel, type ModelSession } from './model'
 import { decode, shiftDetections } from './postprocess'
-import { cropFromGrid, preprocess, type CropRect } from './preprocess'
-import type { FromVisionWorker, MappedBoard, RecognitionResult, ToVisionWorker } from './types'
+import { cropFromGrid, preprocess } from './preprocess'
+import type { BoardGridRect, FromVisionWorker, MappedBoard, RecognitionResult, ToVisionWorker } from './types'
 import { CELLS } from './types'
 
 const CONFIRM_FRAMES = 3
 /** 逐格去抖帧数：连续 2 帧一致才采纳该格变化（吸收走子高亮/动画/相邻格跳变造成的单帧抖动） */
 const STABILIZE_FRAMES = 2
+/** 每多少帧回退一次整帧重新定位棋盘（裁剪帧构图不同会让棋盘框漂移） */
+const CALIBRATE_EVERY = 8
 
 let model: ModelSession | null = null
 let busy = false
@@ -33,10 +35,10 @@ let initStarted = false
 const tracker = new BoardTracker(CONFIRM_FRAMES)
 const stabilizer = new CellStabilizer(CELLS, STABILIZE_FRAMES)
 
-/** 已定位的棋盘裁剪区域（帧像素）；连续 miss 超过阈值后回退全屏重新找棋盘 */
-let lastCrop: CropRect | null = null
-let cropMisses = 0
-const CROP_MISS_RESET = 6
+/** 整帧定位锁定的棋盘网格（归一化帧坐标）；裁剪帧沿用该锚点做格子归属 */
+let lastGrid: BoardGridRect | null = null
+/** 距上次整帧校准的帧数 */
+let framesSinceCalib = 0
 
 function post(msg: FromVisionWorker): void {
   self.postMessage(msg)
@@ -113,7 +115,11 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
   let cellsStable = false
   const t = { pre: 0, infer: 0, post: 0 }
   try {
-    const crop = cropMisses >= CROP_MISS_RESET ? null : lastCrop
+    // 每 CALIBRATE_EVERY 帧回退整帧重新定位棋盘：裁剪画面的构图与整帧不同，
+    // 会让模型检出的棋盘框系统性漂移（实测框高 +3.6%，累积后最底行整行错位），
+    // 故网格锚点以整帧定位为准，裁剪帧只沿用已锁定的网格。
+    const useCrop = lastGrid !== null && framesSinceCalib < CALIBRATE_EVERY
+    const crop = useCrop ? cropFromGrid(lastGrid, frameW, frameH) : null
     const t0 = performance.now()
     const { data, lb, crop: usedCrop } = preprocess(bitmap, crop)
     const t1 = performance.now()
@@ -122,20 +128,27 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     const dets = decode(out, lb, usedCrop.w, usedCrop.h)
     // 裁剪坐标是 crop 局部坐标，偏移回整帧后再做棋盘映射
     const shifted = shiftDetections(dets, usedCrop.x0, usedCrop.y0)
-    mapped = map(shifted, frameW, frameH)
+    // 裁剪帧沿用已锁定的整帧网格；整帧帧用当帧检出的棋盘框
+    mapped = map(shifted, frameW, frameH, 3, useCrop ? lastGrid : null)
     const t3 = performance.now()
     detCount = dets.length
     t.pre = Math.round(t1 - t0)
     t.infer = Math.round(t2 - t1)
     t.post = Math.round(t3 - t2)
+
     if (mapped === null) {
-      cropMisses++
-      // 连续 miss 回退全屏，避免棋盘挪动后残框自锁
-      if (cropMisses >= CROP_MISS_RESET) lastCrop = null
+      // 识别不到：丢弃锁定网格，下一帧回退整帧重定位
+      lastGrid = null
+      framesSinceCalib = 0
       result = invalidResult('未识别到棋盘', detCount)
     } else {
-      cropMisses = 0
-      lastCrop = cropFromGrid(mapped.grid, frameW, frameH)
+      if (!useCrop) {
+        // 整帧定位：更新网格锚点与校准计时
+        lastGrid = mapped.grid
+        framesSinceCalib = 0
+      } else {
+        framesSinceCalib++
+      }
       const stable = stabilizer.update(mapped.canonical)
       cellsStable = equal(stable, mapped.canonical)
       result = toRecognition(mapped, stable)
@@ -181,8 +194,8 @@ self.onmessage = (e: MessageEvent<ToVisionWorker>): void => {
     case 'reset':
       tracker.reset()
       stabilizer.reset()
-      lastCrop = null
-      cropMisses = 0
+      lastGrid = null
+      framesSinceCalib = 0
       break
     case 'ack-decision':
       // 对最新一帧已确认 canonical 做决策；stale canonical 由 tracker internally 判断
@@ -194,8 +207,8 @@ self.onmessage = (e: MessageEvent<ToVisionWorker>): void => {
       model = null
       tracker.reset()
       stabilizer.reset()
-      lastCrop = null
-      cropMisses = 0
+      lastGrid = null
+      framesSinceCalib = 0
       break
   }
 }
