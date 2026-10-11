@@ -190,9 +190,10 @@ function discardPendingVision(): void {
   if (!p) return
   pendingVision.value = null
   vision.state.state = 'capturing'
+  // 只 ack 该快照，不 resetTracker：
+  // reset 会清空 ack，若屏幕仍停在错局 C，下一轮 C 又会被确认并再次弹待确认。
+  // ack discard 已让 C 不再重复提示；画面回到正确局面 P 后 hasAcked 自动失效。
   vision.ackDecision('discard', p.mapped.canonical)
-  // 丢弃后让 tracker 接受当前待确认局面，避免同一快照再次提示
-  vision.resetTracker()
 }
 
 // 手动改盘后让识别重新收敛（避免自动同步覆盖刚手动摆的棋）
