@@ -129,6 +129,16 @@ function iou(
   return inter / (a + b - inter)
 }
 
+/**
+ * 裁剪推理的检测框偏移回整帧坐标。
+ * 注意必须重新构造 YoloDetection：isBoard/piece 是原型 getter，对象展开会丢掉它们。
+ * 偏移为 0 时原样返回（省一次分配）。
+ */
+export function shiftDetections(dets: YoloDetection[], dx: number, dy: number): YoloDetection[] {
+  if (dx === 0 && dy === 0) return dets
+  return dets.map((d) => new YoloDetection(d.labelId, d.score, d.cx + dx, d.cy + dy, d.w, d.h))
+}
+
 export function median(values: number[]): number {
   if (values.length === 0) return 0
   const s = [...values].sort((a, b) => a - b)

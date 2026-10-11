@@ -1,11 +1,12 @@
 // YOLO 输出解码与过滤测试，移植自 Android YoloPipelineTest.kt（5 用例）
 // 夹具为真实模型对 1080×2400 天天象棋开局截图的输出采样
 import { describe, expect, it } from 'vitest'
-import { ANCHORS, DIMS, decode, letterboxForFrame } from './postprocess'
+import { ANCHORS, DIMS, decode, letterboxForFrame, shiftDetections } from './postprocess'
 import { map } from './boardMapper'
 import { canonicalStart, equal } from './assistBoard'
 import { FIXTURE_ROWS } from './__fixtures__/yoloRows'
-import type { YoloDetection } from './types'
+import { YoloDetection } from './types'
+import * as Piece from '../xiangqi/piece'
 
 const FRAME_W = 1080
 const FRAME_H = 2400
@@ -87,5 +88,29 @@ describe('YOLO 后处理（真实夹具）', () => {
     const dets = decode(rows, lb, 640, 640)
     expect(dets.length).toBe(1)
     expect(dets[0]!.piece).toBe(5) // r_che → 红车 WJU
+  })
+})
+
+describe('裁剪推理坐标回偏移', () => {
+  it('偏移为 0 时原样返回（省一次分配）', () => {
+    const dets = [new YoloDetection(4, 0.9, 10, 20, 30, 30)]
+    expect(shiftDetections(dets, 0, 0)).toBe(dets)
+  })
+
+  it('偏移后中心坐标正确，且 getter（isBoard/piece）仍可用', () => {
+    const piece = new YoloDetection(7, 0.9, 100, 200, 30, 30) // r_che
+    const board = new YoloDetection(14, 0.95, 300, 400, 500, 560) // board
+    const out = shiftDetections([piece, board], 50, 80)
+
+    expect(out[0]!.cx).toBe(150)
+    expect(out[0]!.cy).toBe(280)
+    // 原型 getter 必须还在（对象展开会丢掉它们，映射会全错）
+    expect(out[0]!.piece).toBe(Piece.WJU)
+    expect(out[0]!.isBoard).toBe(false)
+    expect(out[1]!.isBoard).toBe(true)
+    expect(out[1]!.piece).toBe(-1)
+    // 尺寸不变
+    expect(out[1]!.w).toBe(500)
+    expect(out[1]!.h).toBe(560)
   })
 })

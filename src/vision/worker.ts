@@ -17,8 +17,8 @@ import { BoardTracker } from './boardTracker'
 import { map } from './boardMapper'
 import { CellStabilizer } from './cellStabilizer'
 import { createSession, runModel, type ModelSession } from './model'
-import { decode } from './postprocess'
-import { preprocess } from './preprocess'
+import { decode, shiftDetections } from './postprocess'
+import { cropFromGrid, preprocess, type CropRect } from './preprocess'
 import type { FromVisionWorker, MappedBoard, RecognitionResult, ToVisionWorker } from './types'
 import { CELLS } from './types'
 
@@ -32,6 +32,11 @@ let disposed = false
 let initStarted = false
 const tracker = new BoardTracker(CONFIRM_FRAMES)
 const stabilizer = new CellStabilizer(CELLS, STABILIZE_FRAMES)
+
+/** 已定位的棋盘裁剪区域（帧像素）；连续 miss 超过阈值后回退全屏重新找棋盘 */
+let lastCrop: CropRect | null = null
+let cropMisses = 0
+const CROP_MISS_RESET = 6
 
 function post(msg: FromVisionWorker): void {
   self.postMessage(msg)
@@ -108,21 +113,29 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
   let cellsStable = false
   const t = { pre: 0, infer: 0, post: 0 }
   try {
+    const crop = cropMisses >= CROP_MISS_RESET ? null : lastCrop
     const t0 = performance.now()
-    const { data, lb } = preprocess(bitmap)
+    const { data, lb, crop: usedCrop } = preprocess(bitmap, crop)
     const t1 = performance.now()
     const out = await runModel(model, data)
     const t2 = performance.now()
-    const dets = decode(out, lb, frameW, frameH)
-    mapped = map(dets, frameW, frameH)
+    const dets = decode(out, lb, usedCrop.w, usedCrop.h)
+    // 裁剪坐标是 crop 局部坐标，偏移回整帧后再做棋盘映射
+    const shifted = shiftDetections(dets, usedCrop.x0, usedCrop.y0)
+    mapped = map(shifted, frameW, frameH)
     const t3 = performance.now()
     detCount = dets.length
     t.pre = Math.round(t1 - t0)
     t.infer = Math.round(t2 - t1)
     t.post = Math.round(t3 - t2)
     if (mapped === null) {
+      cropMisses++
+      // 连续 miss 回退全屏，避免棋盘挪动后残框自锁
+      if (cropMisses >= CROP_MISS_RESET) lastCrop = null
       result = invalidResult('未识别到棋盘', detCount)
     } else {
+      cropMisses = 0
+      lastCrop = cropFromGrid(mapped.grid, frameW, frameH)
       const stable = stabilizer.update(mapped.canonical)
       cellsStable = equal(stable, mapped.canonical)
       result = toRecognition(mapped, stable)
@@ -168,6 +181,8 @@ self.onmessage = (e: MessageEvent<ToVisionWorker>): void => {
     case 'reset':
       tracker.reset()
       stabilizer.reset()
+      lastCrop = null
+      cropMisses = 0
       break
     case 'ack-decision':
       // 对最新一帧已确认 canonical 做决策；stale canonical 由 tracker internally 判断
@@ -179,6 +194,8 @@ self.onmessage = (e: MessageEvent<ToVisionWorker>): void => {
       model = null
       tracker.reset()
       stabilizer.reset()
+      lastCrop = null
+      cropMisses = 0
       break
   }
 }
