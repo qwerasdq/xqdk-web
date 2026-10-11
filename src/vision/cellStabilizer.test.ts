@@ -56,6 +56,34 @@ describe('CellStabilizer 逐格去抖', () => {
     expect(s.update(a)[at(4, 9)]).toBe(Piece.WSHUAI)
   })
 
+  it('相邻格来回跳变不会被沉淀成稳定值', () => {
+    const s = new CellStabilizer(CELLS, 2)
+    const a = board([[4, 9, Piece.WSHUAI]])
+    const b = board([[3, 9, Piece.WSHUAI]])
+    s.update(a) // 冷启动：稳定在 a
+
+    // a/b 交替：单纯"连续 2 帧同值即采纳"会让 b 在第 2 帧被沉淀
+    expect(s.update(b)[at(3, 9)]).toBe(Piece.EMPTY) // b 第 1 帧
+    expect(s.update(a)[at(3, 9)]).toBe(Piece.EMPTY) // 回到 a：跳变迹象，b 不采纳
+    expect(s.update(b)[at(3, 9)]).toBe(Piece.EMPTY) // b 第 2 帧，仍不够
+    expect(s.update(a)[at(3, 9)]).toBe(Piece.EMPTY) // 又跳回
+    expect(s.update(b)[at(3, 9)]).toBe(Piece.EMPTY) // b 第 3 帧，仍不够（跳变后要求连续 3 帧）
+    expect(s.unstableCellCount).toBeGreaterThan(0)
+  })
+
+  it('跳变后真正稳定下来（连续 3 帧同格）会被采纳', () => {
+    const s = new CellStabilizer(CELLS, 2)
+    const a = board([[4, 9, Piece.WSHUAI]])
+    const b = board([[3, 9, Piece.WSHUAI]])
+    s.update(a)
+    s.update(b) // 第 1 帧
+    s.update(a) // 跳回
+    s.update(b) // 第 1 帧（跳变标记已置位）
+    s.update(b) // 第 2 帧
+    expect(s.update(b)[at(3, 9)]).toBe(Piece.WSHUAI) // 第 3 帧连续同格，采纳
+    expect(s.unstableCellCount).toBe(0)
+  })
+
   it('返回值与内部状态隔离：改返回值不影响后续帧', () => {
     const s = new CellStabilizer(CELLS, 2)
     const base = board([[0, 0, Piece.BJU]])

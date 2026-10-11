@@ -18,6 +18,7 @@ export interface FrameDiag {
   frameW: number
   frameH: number
   cellsStable: boolean
+  unstableCells: number
 }
 
 const props = defineProps<{
@@ -72,7 +73,7 @@ const diagText = computed(() => {
   if (d.issues.length) parts.push(`校验失败：${d.issues.join('、')}`)
   else if (d.pieceCount !== null) {
     parts.push(`稳定 ${Math.min(d.candidateFrames, 3)}/3 帧`)
-    parts.push(`去抖 ${d.cellsStable ? '已收敛' : '有变化'}`)
+    parts.push(`去抖 ${d.cellsStable ? '已收敛' : `${d.unstableCells} 格抖动`}`)
   }
   return parts.join(' · ')
 })

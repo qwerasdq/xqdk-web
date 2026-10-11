@@ -9,14 +9,22 @@
 // 误检仍可被下游（规则层合法着法校验 / 人工确认）拦截。
 //
 // 只做时间维度去抖，不猜内容——不引入任何棋子/棋规知识，与 Android 侧逻辑保持同一语义。
+//
+// 跳变惩罚：同一格若在 A/B 之间来回跳，单纯“连续 2 帧同值即采纳”会让 B 与 A 交替被沉淀，
+// 最终把错检当成新局。这里对“最近 2 帧不是同一候选”的情况累计斗争次数，连续 3 帧同格才
+// 真正采纳，避免相邻格来回跳被沉淀。
 
 /** 默认去抖帧数：连续 2 帧一致即采纳（~800ms/帧下约 1.6s 确认一格变化） */
 export const DEFAULT_NEED_FRAMES = 2
+/** 来回跳变后需要的稳定帧数：2 帧不够，必须连续 3 帧同格才采纳 */
+const JITTER_STEADY_FRAMES = 3
 
 export class CellStabilizer {
   private stable: Uint8Array | null = null
   private readonly pending: Uint8Array
   private readonly hits: Uint8Array
+  /** 标记该格最近是否出现来回跳变（A→B→A 等） */
+  private readonly unstableCells: Uint8Array
 
   constructor(
     private readonly cells: number,
@@ -24,6 +32,7 @@ export class CellStabilizer {
   ) {
     this.pending = new Uint8Array(cells)
     this.hits = new Uint8Array(cells)
+    this.unstableCells = new Uint8Array(cells)
   }
 
   /** 丢弃历史（新对局/手动改盘后调用），下一次 update 重新冷启动 */
@@ -31,6 +40,7 @@ export class CellStabilizer {
     this.stable = null
     this.pending.fill(0)
     this.hits.fill(0)
+    this.unstableCells.fill(0)
   }
 
   /**
@@ -45,6 +55,7 @@ export class CellStabilizer {
       this.stable = raw.slice()
       this.pending.set(raw)
       this.hits.fill(0)
+      this.unstableCells.fill(0)
       return this.stable.slice()
     }
 
@@ -52,22 +63,28 @@ export class CellStabilizer {
     for (let i = 0; i < this.cells; i++) {
       const v = raw[i]!
       if (v === s[i]) {
-        // 与稳定值一致：清掉该格的候选累计
+        // 回到已稳定值：清掉候选累计。但若该格此前有跳变迹象，标记要保留——
+        // 否则 A/B 交替时，回到 A 就清标记，B 永远只攒到 1 帧，跳变惩罚形同虚设。
         this.pending[i] = v
         this.hits[i] = 0
         continue
       }
+
       if (v === this.pending[i]) {
         const h = this.hits[i]! + 1
-        if (h >= this.needFrames) {
+        if (h >= (this.unstableCells[i] ? JITTER_STEADY_FRAMES : this.needFrames)) {
           s[i] = v
           this.hits[i] = 0
+          this.unstableCells[i] = 0
         } else {
           this.hits[i] = h
         }
       } else {
+        // 候选被另一个值顶替，或从稳定值再次离开：说明该格在摆动（相邻格跳变/误检），
+        // 置跳变标记，需要更长的连续稳定才采纳。
         this.pending[i] = v
         this.hits[i] = 1
+        this.unstableCells[i] = 1
       }
     }
     return s.slice()
@@ -76,5 +93,12 @@ export class CellStabilizer {
   /** 当前稳定局面（诊断用；未冷启动时为 null） */
   get current(): Uint8Array | null {
     return this.stable
+  }
+
+  /** 当前仍有跳变迹象的格数（诊断用） */
+  get unstableCellCount(): number {
+    let n = 0
+    for (let i = 0; i < this.cells; i++) n += this.unstableCells[i]!
+    return n
   }
 }

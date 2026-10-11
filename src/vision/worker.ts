@@ -99,13 +99,13 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
   const { id, bitmap, frameW, frameH } = msg
   if (model === null) {
     bitmap.close()
-    post({ type: 'frame-result', id, error: '模型未加载', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, timings: { pre: 0, infer: 0, post: 0 } })
+    post({ type: 'frame-result', id, error: '模型未加载', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, unstableCells: 0, timings: { pre: 0, infer: 0, post: 0 } })
     return
   }
   if (busy) {
     // 上一帧还在推理：丢弃本帧（主线程按节流发送，堆积说明推理慢于抽帧）
     bitmap.close()
-    post({ type: 'frame-result', id, error: 'busy', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, timings: { pre: 0, infer: 0, post: 0 } })
+    post({ type: 'frame-result', id, error: 'busy', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, unstableCells: 0, timings: { pre: 0, infer: 0, post: 0 } })
     return
   }
   busy = true
@@ -113,6 +113,7 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
   let detCount = 0
   let result = invalidResult('识别失败', 0)
   let cellsStable = false
+  let unstableCells = 0
   const t = { pre: 0, infer: 0, post: 0 }
   try {
     // 每 CALIBRATE_EVERY 帧回退整帧重新定位棋盘：裁剪画面的构图与整帧不同，
@@ -151,6 +152,9 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
       }
       const stable = stabilizer.update(mapped.canonical)
       cellsStable = equal(stable, mapped.canonical)
+      unstableCells = stabilizer.unstableCellCount
+      // 稳定盘喂 tracker；原始盘不一致时 UI 能看到“有变化”，
+      // tracker 仍按候选/确认流程处理，避免真实走子被误判为不稳定。
       result = toRecognition(mapped, stable)
     }
   } catch (e) {
@@ -178,6 +182,7 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     frameW,
     frameH,
     cellsStable,
+    unstableCells,
     timings: t,
   })
 }

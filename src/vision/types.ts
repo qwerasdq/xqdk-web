@@ -114,6 +114,8 @@ export type FromVisionWorker =
       frameH: number
       /** 诊断用：此帧原始映射与去抖前的逐格一致性（true=无单格抖动） */
       cellsStable: boolean
+      /** 诊断用：仍有跳变迹象的格数 */
+      unstableCells: number
       timings: { pre: number; infer: number; post: number }
     }
   | { type: 'log'; text: string }
