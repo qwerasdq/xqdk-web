@@ -319,7 +319,11 @@ async function runPlans(token: number): Promise<void> {
         topN: 3,
       },
       (plan) => {
-        if (!isStale()) assistPlans.value = [...assistPlans.value, plan]
+        if (!isStale()) {
+          assistPlans.value = [...assistPlans.value, plan]
+          // 第一条预案可用即可结束"计算中"，后续预案后台渐进补全，不阻塞 UI
+          if (assistPlans.value.length === 1) plansLoading.value = false
+        }
       },
       isStale,
     )

@@ -73,8 +73,8 @@ export async function buildPlans(
   const oppLines = await analyzeOnce(req.fen, req.moves, req.oppMovetime, topN)
   if (isStale()) return
 
-  // 2. 逐个候选求我方应对
-  for (const line of oppLines) {
+  // 2. 逐个候选求我方应对；第一条应手最重要，后续应手给更短时间（渐进补全）
+  for (const [index, line] of oppLines.entries()) {
     if (isStale()) return
     const oppUcci = line.pv[0]
     if (!oppUcci) continue
@@ -98,8 +98,9 @@ export async function buildPlans(
     const afterFen = board.toFENString()
 
     // 3. 我方应对（单线搜索足够——预案展示只需最佳应手）。
-    //    时间限短于对方候选，让第一条预案更快出来。
-    const myLines = await analyzeOnce(afterFen, [], req.myMovetime, 1)
+    //    第一条用足时间，后续递减到 60%，不在后台过度阻塞。
+    const myTime = index === 0 ? req.myMovetime : Math.max(500, Math.round(req.myMovetime * 0.6))
+    const myLines = await analyzeOnce(afterFen, [], myTime, 1)
     if (isStale()) return
     const myUcci = myLines[0]?.pv[0]
     if (!myUcci) continue

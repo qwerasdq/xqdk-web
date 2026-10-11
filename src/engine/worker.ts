@@ -25,6 +25,7 @@ var ready = false
 var engineId = ''
 var engineName = ''
 var activeSearchId = null
+// 新搜索请求到达时若当前搜索未结束，只保留“最新”一个，避免旧请求堆积互相打断
 var pendingGo = null
 
 function post(m) { self.postMessage(m) }
@@ -60,7 +61,8 @@ function startSearch(go) {
 
 function requestSearch(go) {
   if (activeSearchId != null) {
-    // 已有搜索在跑：排队，stop 旧搜索（旧 bestmove 回来后自动启动新搜索）
+    // 已有搜索在跑：只保留“最新请求”，丢弃任何更早的排队请求。
+    // 旧搜索被 stop 后自动启动最新请求，避免 JJ 多请求场景反复重启旧搜索。
     pendingGo = go
     sendUci('stop')
   } else {
