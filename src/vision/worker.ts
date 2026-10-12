@@ -119,9 +119,8 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
   let unstableCells = 0
   const t = { pre: 0, infer: 0, post: 0 }
   try {
-    // 每 CALIBRATE_EVERY 帧回退整帧重新定位棋盘：裁剪画面的构图与整帧不同，
-    // 会让模型检出的棋盘框系统性漂移（实测框高 +3.6%，累积后最底行整行错位），
-    // 故网格锚点以整帧定位为准，裁剪帧只沿用已锁定的网格。
+    // 裁剪后的画面里棋盘占比大得多，模型检出的棋盘框更准（整帧小棋盘常检不出或高估框高），
+    // 所以常规帧走裁剪；每 CALIBRATE_EVERY 帧回退一次整帧，防止棋盘移出裁剪窗口后锁死。
     const useCrop = lastGrid !== null && framesSinceCalib < CALIBRATE_EVERY
     const crop = useCrop ? cropFromGrid(lastGrid, frameW, frameH) : null
     const t0 = performance.now()
@@ -132,8 +131,9 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     const dets = decode(out, lb, usedCrop.w, usedCrop.h)
     // 裁剪坐标是 crop 局部坐标，偏移回整帧后再做棋盘映射
     const shifted = shiftDetections(dets, usedCrop.x0, usedCrop.y0)
-    // 裁剪帧沿用已锁定的整帧网格；整帧帧用当帧检出的棋盘框
-    mapped = map(shifted, frameW, frameH, 3, useCrop ? lastGrid : null)
+    // 优先用当帧自己检出的棋盘框（高缩比下裁剪帧的框明显更准）；
+    // 本帧检不出可用框时才退回上一帧锁定的网格
+    mapped = map(shifted, frameW, frameH, 3, lastGrid)
     const t3 = performance.now()
     detCount = dets.length
     t.pre = Math.round(t1 - t0)
@@ -146,13 +146,11 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
       framesSinceCalib = 0
       result = invalidResult('未识别到棋盘', detCount)
     } else {
-      if (!useCrop) {
-        // 整帧定位：更新网格锚点与校准计时
-        lastGrid = mapped.grid
-        framesSinceCalib = 0
-      } else {
-        framesSinceCalib++
-      }
+      // 每帧都用当帧定位结果更新锚点：裁剪帧的棋盘框同样准确（甚至更准），
+      // 网格随之收敛，棋盘小幅移动也能跟上。
+      if (mapped.grid) lastGrid = mapped.grid
+      if (useCrop) framesSinceCalib++
+      else framesSinceCalib = 0
       const stable = stabilizer.update(mapped.canonical)
       cellsStable = equal(stable, mapped.canonical)
       unstableCells = stabilizer.unstableCellCount

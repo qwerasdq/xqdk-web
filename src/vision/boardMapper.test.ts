@@ -146,28 +146,41 @@ describe('检测 → 棋盘映射', () => {
     expect(equal(canonicalStart(), mapped!.canonical)).toBe(true)
   })
 
-  it('gridOverride 用锁定网格替代当帧棋盘框（裁剪帧框漂移不影响归属）', () => {
-    const dets = startDetections(false)
-    const ref = map(dets, FRAME_W, FRAME_H)!
-    expect(equal(canonicalStart(), ref.canonical)).toBe(true)
-
-    // 模拟裁剪帧的棋盘框漂移：框整体上移 0.5 格（裁剪构图下模型框中心/高度会变），
-    // 行号随之整体减 0.5，最底行 round 到上一行 —— 即"最底下的棋子整体上移一行"。
-    const gridH = 9 * CELL_H
-    const shifted = new YoloDetection(
+  it('棋盘框高度高估 13% 时用棋子间距自动校正（真实捕获的主要失效模式）', () => {
+    // 真实场景：1080p 整屏里棋盘只有 445px 宽，模型 board 框宽准、高估约 13%。
+    // 直接用该框均分网格会把最底行整行推到上一行 —— 即"最底下棋子整体上移一行"。
+    const pieces = startDetections(false).filter((d) => !d.isBoard)
+    const inflated = new YoloDetection(
       LABEL_BOARD, 0.95,
-      boardDet.cx, boardDet.cy - 0.5 * gridH, boardDet.w, boardDet.h,
+      boardDet.cx, boardDet.cy + 0.5 * 9 * CELL_H * 0.13,
+      8 * CELL_W, 9 * CELL_H * 1.13,
     )
-    const pieces = dets.filter((d) => !d.isBoard)
 
-    // 不加锁定：最底行整行丢失（复现错位）
-    const withoutLock = map([...pieces, shifted], FRAME_W, FRAME_H)!
-    expect(equal(canonicalStart(), withoutLock.canonical)).toBe(false)
-    expect(withoutLock.canonical[at(4, 9)]).toBe(Piece.EMPTY)
+    const fixed = map([...pieces, inflated], FRAME_W, FRAME_H)!
+    expect(equal(canonicalStart(), fixed.canonical)).toBe(true)
+    expect(fixed.pieceCount).toBe(32)
+  })
 
-    // 加锁定：沿用整帧锚点，结果与基准逐格一致
-    const withLock = map([...pieces, shifted], FRAME_W, FRAME_H, 3, ref.grid)!
-    expect(equal(canonicalStart(), withLock.canonical)).toBe(true)
-    expect(withLock.pieceCount).toBe(32)
+  it('棋盘框不可用时退回 fallbackGrid（低分辨率整帧常直接检不出棋盘框）', () => {
+    const pieces = startDetections(false).filter((d) => !d.isBoard)
+    const ref = map([...pieces, boardDet], FRAME_W, FRAME_H)!
+
+    // 只有棋子、没有棋盘框：32 子时走包围盒兜底
+    const noBoard = map(pieces, FRAME_W, FRAME_H)!
+    expect(equal(canonicalStart(), noBoard.canonical)).toBe(true)
+
+    // 残局（子数不足以走包围盒兜底）没有 fallbackGrid 就应失败
+    const sparse = pieces.filter((d) => d.cy < BOARD_Y0 + 3 * CELL_H)
+    expect(map(sparse, FRAME_W, FRAME_H)).toBeNull()
+
+    // 传入上一帧定位的网格即可恢复
+    const recovered = map(sparse, FRAME_W, FRAME_H, 3, ref.grid)!
+    expect(recovered).not.toBeNull()
+    expect(recovered.pieceCount).toBe(sparse.length)
+    for (const d of sparse) {
+      const col = Math.round((d.cx - BOARD_X0) / CELL_W)
+      const row = Math.round((d.cy - BOARD_Y0) / CELL_H)
+      expect(recovered.screenRaw[at(col, row)]).toBe(PIECE_CODES[d.labelId])
+    }
   })
 })

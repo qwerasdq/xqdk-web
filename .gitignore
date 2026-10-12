@@ -12,3 +12,6 @@ public/ort/
 
 # 视觉调试样本图（从 D:\chess-dike\docs\images 复制，测试后删除）
 public/samples/
+
+# 本机实测截图（一次性排查用，不入 git）
+w6f_edgeone_live.png
