@@ -2,6 +2,68 @@
 
 Web 端中国象棋 AI 辅助对弈应用。方案见 [CLAUDE.md](CLAUDE.md)（v2.0）。
 
+## 2026-10-12 — JJ 支招优化（一）：引擎搜索取消/代次保护
+
+### 背景
+
+- 用户实测 JJ 支招仍偶发卡顿/分析慢。
+- 根因：引擎搜索没有显式取消/代次保护。旧请求被新搜索 stop 后仍会 resolve/继续占
+  worker 队列；JJ 多次同步/悔棋/切模式时旧 Promise 会堆积，感觉像“卡顿”。
+
+### 本次交付（第一部分）
+
+| 文件 | 说明 |
+|---|---|
+| src/engine/useEngine.ts | `pendingSearches` 改为 `{ resolve, reject, timer }`；新增 `abortPendingSearches`、`cancelEngineSearch`、`EngineSearchCancelledError`；`engineSearch`/`engineAnalyze` 新请求前先 abort 旧请求，bestmove 只允许最新代次 resolve |
+| src/engine/worker.ts | 新增 `cancelSearch` 协议：清空 `pendingGo` 并 stop 当前搜索 |
+| src/App.vue | 新局/悔棋/FEN/切模式时调用 `cancelEngineSearch()`；AI 搜索、分析、预案 catch 主动取消错误 |
+
+### 验证
+
+- `vue-tsc --noEmit` 通过。
+- 单测全量在后续步骤统一跑。
+
+### 遗留 / 下一步
+
+- 继续 JJ 分析 time-box、识别反馈、UI 状态对齐、测试覆盖（见计划
+  `.claude/plans/jj-smooth-feather.md`）。
+
+## 2026-10-12 — JJ 支招优化（二）：time-box + 识别确认反馈 + UI 状态
+
+### 本次交付（第二部分）
+
+- JJ 我方回合候选分析从固定 `depth` 改为 `movetime: 2500`，正式对弈/分析仍用原 depth。
+- JJ 预案/候选常量抽成 `JJ_CANDIDATE_MOVETIME_MS` / `JJ_PLAN_OPP_MOVETIME_MS` / `JJ_PLAN_MY_MOVETIME_MS`。
+- 新增 `plansCompleting`：第一条预案可用后结束“计算中”，后台补全时显示“补全中…”。
+- JJ 自动识别已启动时，面板不再提示“点右侧棋盘同步”，改为自动同步文案。
+- `BoardTracker` 支持 `initialConfirmCount`：冷启动 3 帧，后续新局 1 帧确认，避免逐格 2 帧 + 整盘 3 帧叠加延迟。
+- VisionControl 诊断改为“候选 N 帧 / 去抖 已收敛 | N 格抖动”，按钮统一“开始识别/停止识别”。
+
+### 验证
+
+- `vue-tsc --noEmit` 通过。
+- 单测全量在测试部分统一跑。
+
+### 遗留 / 下一步
+
+- 补引擎取消与 App 集成测试，继续第四部分。
+
+## 2026-10-12 — JJ 支招优化（三）：测试覆盖
+
+### 本次交付（第四部分）
+
+- 新增 `src/engine/useEngine.test.ts`（4 例）：新请求取代旧请求 reject、主动取消通知 worker、
+  movetime 生成、旧代次 bestmove 不 resolve。
+- 新增 `src/App.integration.test.ts`（1 例）：JJ 自动识别启动后不再显示手动同步文案。
+- `boardTracker.test.ts` 新增冷启动/后续确认帧数用例。
+- 新增 dev 依赖 `@vue/test-utils`、`happy-dom`。
+
+### 验证
+
+- `npx vitest run`：145 个测试全过（新增 6 个）。
+- `npm run build`：通过。
+- `vue-tsc --noEmit`：通过。
+
 ## 2026-10-11 — JJ/Android 识别不稳定与误识别：逐格去抖 + 禁止自动掉盘
 
 ### 根因

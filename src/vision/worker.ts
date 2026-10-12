@@ -22,7 +22,10 @@ import { cropFromGrid, preprocess } from './preprocess'
 import type { BoardGridRect, FromVisionWorker, MappedBoard, RecognitionResult, ToVisionWorker } from './types'
 import { CELLS } from './types'
 
-const CONFIRM_FRAMES = 3
+// 冷启动仍要求 3 帧（防开局误检）；已确认后的新局用 1 帧即可确认，
+// 避免 CellStabilizer 2 帧 + BoardTracker 3 帧叠加成“画面变了但一直识别中”。
+const CONFIRM_FRAMES = 1
+const INITIAL_CONFIRM_FRAMES = 3
 /** 逐格去抖帧数：连续 2 帧一致才采纳该格变化（吸收走子高亮/动画/相邻格跳变造成的单帧抖动） */
 const STABILIZE_FRAMES = 2
 /** 每多少帧回退一次整帧重新定位棋盘（裁剪帧构图不同会让棋盘框漂移） */
@@ -32,7 +35,7 @@ let model: ModelSession | null = null
 let busy = false
 let disposed = false
 let initStarted = false
-const tracker = new BoardTracker(CONFIRM_FRAMES)
+const tracker = new BoardTracker(CONFIRM_FRAMES, INITIAL_CONFIRM_FRAMES)
 const stabilizer = new CellStabilizer(CELLS, STABILIZE_FRAMES)
 
 /** 整帧定位锁定的棋盘网格（归一化帧坐标）；裁剪帧沿用该锚点做格子归属 */

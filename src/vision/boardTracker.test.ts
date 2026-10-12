@@ -86,6 +86,21 @@ describe('BoardTracker 多帧确认', () => {
     expect(equal(b, tracker.confirmed!.canonical)).toBe(true)
   })
 
+  it('冷启动 initialConfirmCount=3，之后 confirmCount=1 即可确认新局', () => {
+    const tracker = new BoardTracker(1, 3)
+    tracker.reset(true)
+    const start = canonicalStart()
+    const mid = midBoard()
+
+    // 冷启动仍需 3 帧
+    expect(tracker.onFrame(res(start))).toBe('UNSTABLE')
+    expect(tracker.onFrame(res(start))).toBe('UNSTABLE')
+    expect(tracker.onFrame(res(start))).toBe('NEW_GAME')
+
+    // 已确认后，新局面 1 帧即可确认（避免 CellStabilizer + tracker 双重延迟）
+    expect(tracker.onFrame(res(mid))).toBe('NEW_BOARD')
+  })
+
   it('子数跳变超容差被拒绝并保持原局面', () => {
     const start = canonicalStart()
     const tracker = new BoardTracker(3)

@@ -19,6 +19,8 @@ const props = defineProps<{
   /** 对方回合的应对预案 */
   plans: AssistPlan[]
   plansLoading: boolean
+  /** 第一条预案已出，后台仍在补全其余预案 */
+  plansCompleting: boolean
   analyzing: boolean
   selectedUcci: string | null
   selectedPlan: number
@@ -80,9 +82,9 @@ const myTurn = computed(() => (props.redGo ? 'red' : 'black') === props.mySide)
     </div>
 
     <div class="hint">
-      {{ myTurn
-        ? '在 JJ 落子后，点右侧棋盘同步同一着法；下面是引擎建议'
-        : '对方走完后，点右侧棋盘同步对方的着法；下面是应对预案' }}
+      {{ visionStarted
+        ? (myTurn ? '自动识别 JJ 盘面，落子后稍候同步；下面是引擎建议' : '自动识别 JJ 盘面，对方走后稍候同步；下面是应对预案')
+        : (myTurn ? '在 JJ 落子后，点右侧棋盘同步同一着法；下面是引擎建议' : '对方走完后，点右侧棋盘同步对方的着法；下面是应对预案') }}
     </div>
 
     <!-- 我方回合：候选着法（复用分析面板：评分/胜率/候选/PV） -->
@@ -100,6 +102,7 @@ const myTurn = computed(() => (props.redGo ? 'red' : 'black') === props.mySide)
       <div class="plans-title">
         对方可能走法与我方应对
         <span v-if="plansLoading" class="loading">计算中…</span>
+        <span v-else-if="plansCompleting" class="loading">补全中…</span>
       </div>
       <button
         v-for="(p, i) in plans"

@@ -146,5 +146,10 @@ self.onmessage = async function (e) {
   if (m.type === 'uci') { sendUci(m.cmd); return }
   if (m.type === 'go') { requestSearch(m); return }
   if (m.type === 'stopSearch') { if (activeSearchId === m.id) sendUci('stop') }
+  if (m.type === 'cancelSearch') {
+    // 主线程主动取消：清空排队请求；当前搜索 stop 后不再启动任何新请求
+    pendingGo = null
+    if (activeSearchId != null) sendUci('stop')
+  }
 }
 `

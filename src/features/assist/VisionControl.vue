@@ -72,7 +72,7 @@ const diagText = computed(() => {
   parts.push(d.pieceCount !== null ? `识别到 ${d.pieceCount} 子` : `检测 ${d.detections} 框`)
   if (d.issues.length) parts.push(`校验失败：${d.issues.join('、')}`)
   else if (d.pieceCount !== null) {
-    parts.push(`稳定 ${Math.min(d.candidateFrames, 3)}/3 帧`)
+    parts.push(`候选 ${d.candidateFrames} 帧`)
     parts.push(`去抖 ${d.cellsStable ? '已收敛' : `${d.unstableCells} 格抖动`}`)
   }
   return parts.join(' · ')
@@ -90,9 +90,9 @@ const diagText = computed(() => {
     </div>
     <div class="vision-actions">
       <button v-if="!isRunning" class="small" :disabled="isBusy" @click="emit('start')">
-        {{ state === 'error' ? '重试' : '开始捕获' }}
+        {{ state === 'error' ? '重试' : '开始识别' }}
       </button>
-      <button v-else class="small danger" @click="emit('stop')">停止</button>
+      <button v-else class="small danger" @click="emit('stop')">停止识别</button>
     </div>
     <p v-if="sourceInfo && state !== 'idle'" class="source">{{ sourceLabel }}</p>
     <canvas v-show="isRunning" ref="preview" class="preview" />

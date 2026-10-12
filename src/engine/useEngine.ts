@@ -50,7 +50,20 @@ const readyWaiters: ReadyWaiter[] = []
 const infoListeners = new Set<(id: number, i: EngineInfo) => void>()
 
 let searchSeq = 0
-const pendingSearches = new Map<number, (r: BestmoveResult) => void>()
+interface PendingSearch {
+  resolve: (r: BestmoveResult) => void
+  reject: (e: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+const pendingSearches = new Map<number, PendingSearch>()
+
+/** 主动取消/被新请求替代时抛出的错误，调用方可忽略 */
+export class EngineSearchCancelledError extends Error {
+  constructor(message = 'engine search cancelled') {
+    super(message)
+    this.name = 'EngineSearchCancelledError'
+  }
+}
 
 const SEARCH_TIMEOUT_MS = 30_000
 const ENGINE_INIT_TIMEOUT_MS = 30_000
@@ -61,6 +74,22 @@ function clearInitTimer(): void {
     clearTimeout(initTimer)
     initTimer = null
   }
+}
+
+/** 取消/终止所有待搜索请求（新搜索替代、切模式、悔棋、改盘时调用） */
+function abortPendingSearches(reason: string): void {
+  const err = new EngineSearchCancelledError(reason)
+  for (const [id, pending] of pendingSearches) {
+    clearTimeout(pending.timer)
+    pending.reject(err)
+    pendingSearches.delete(id)
+  }
+}
+
+/** 显式取消当前所有搜索（App 切模式/悔棋/离开 JJ 时调用） */
+export function cancelEngineSearch(): void {
+  abortPendingSearches('cancelEngineSearch')
+  worker?.postMessage({ type: 'cancelSearch' })
 }
 
 function disposeWorker(): void {
@@ -140,10 +169,13 @@ async function warmEngineCache(): Promise<void> {
   if (msg.type === 'bestmove') {
     const result = parseBestmoveLine(msg.text)
     if (result) {
-      const resolve = pendingSearches.get(msg.id)
-      if (resolve) {
+      const pending = pendingSearches.get(msg.id)
+      if (pending) {
         pendingSearches.delete(msg.id)
-        resolve(result)
+        clearTimeout(pending.timer)
+        // 只允许最新代次 resolve；旧请求在 stop 后即使 bestmove 回来也丢弃
+        if (searchSeq === msg.id) pending.resolve(result)
+        else pending.reject(new EngineSearchCancelledError('stale search replaced'))
       }
     }
     return
@@ -218,6 +250,8 @@ export async function setEngineOption(name: string, value: string | number): Pro
 export async function engineSearch(req: SearchRequest): Promise<BestmoveResult> {
   await waitReady()
   ensureMultiPv(1) // 对弈搜索固定单线
+  // 新请求取代旧请求：先终止所有 pending，避免旧 Promise 继续等待/占用队列
+  abortPendingSearches('replaced by newer search')
   const id = ++searchSeq
   const { fen, moves, depth, movetime, searchmoves } = req
   let goCmd = ''
@@ -230,9 +264,10 @@ export async function engineSearch(req: SearchRequest): Promise<BestmoveResult> 
       pendingSearches.delete(id)
       reject(new Error(`引擎搜索超时（${SEARCH_TIMEOUT_MS}ms）`))
     }, SEARCH_TIMEOUT_MS)
-    pendingSearches.set(id, (r) => {
-      clearTimeout(timer)
-      resolve(r)
+    pendingSearches.set(id, {
+      resolve,
+      reject,
+      timer,
     })
     worker?.postMessage({ type: 'go', id, fen, moves, goCmd, searchmoves: searchmoves ?? [] })
   })
@@ -288,6 +323,8 @@ export async function engineAnalyze(
   }
 
   ensureMultiPv(multipv)
+  // 新分析取代旧分析：先终止所有 pending，避免旧请求继续占用引擎/UI
+  abortPendingSearches('replaced by newer analysis')
 
   return new Promise<BestmoveResult>((resolve, reject) => {
     const id = ++searchSeq
@@ -299,6 +336,7 @@ export async function engineAnalyze(
 
     const timer = setTimeout(() => {
       unsubscribe()
+      pendingSearches.delete(id)
       reject(new Error(`引擎分析超时（${SEARCH_TIMEOUT_MS}ms）`))
     }, SEARCH_TIMEOUT_MS)
 
@@ -306,7 +344,8 @@ export async function engineAnalyze(
     let lastFlush = 0
 
     const unsubscribe = onEngineInfo((searchId, info) => {
-      if (searchId !== id) return
+      // 旧代次的 info 不再进入 UI/缓存
+      if (searchId !== id || searchSeq !== id) return
       collected.set(info.multipv, info)
       const now = Date.now()
       if (now - lastFlush < INFO_UPDATE_THROTTLE_MS) return
@@ -314,17 +353,25 @@ export async function engineAnalyze(
       onUpdate(toLines(collected, sideToMove))
     })
 
-    pendingSearches.set(id, (r) => {
-      clearTimeout(timer)
-      unsubscribe()
-      const lines = toLines(collected, sideToMove)
-      onUpdate(lines) // 终版
-      // 仅缓存自然完成（未被新搜索 stop）的结果，避免把浅层截断结果当终版缓存
-      if (searchSeq === id) {
-        const entry: AnalysisCacheEntry = { lines, result: r }
-        analysisCache.set(cacheKey, entry)
-      }
-      resolve(r)
+    pendingSearches.set(id, {
+      resolve: (r) => {
+        clearTimeout(timer)
+        unsubscribe()
+        const lines = toLines(collected, sideToMove)
+        onUpdate(lines) // 终版
+        // 仅缓存自然完成（未被新搜索 stop）的结果，避免把浅层截断结果当终版缓存
+        if (searchSeq === id) {
+          const entry: AnalysisCacheEntry = { lines, result: r }
+          analysisCache.set(cacheKey, entry)
+        }
+        resolve(r)
+      },
+      reject: (e) => {
+        clearTimeout(timer)
+        unsubscribe()
+        reject(e)
+      },
+      timer,
     })
 
     worker?.postMessage({ type: 'go', id, fen, moves, goCmd, searchmoves: searchmoves ?? [] })

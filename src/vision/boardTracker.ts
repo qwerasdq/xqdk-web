@@ -28,7 +28,11 @@ export class BoardTracker {
   private ackedApplied: Uint8Array | null = null
   private ackedDiscarded: Uint8Array | null = null
 
-  constructor(private readonly confirmCount = 3) {}
+  constructor(
+    private readonly confirmCount = 3,
+    /** 冷启动首次确认所需帧数（与后续确认帧数分开，避免开局慢） */
+    private readonly initialConfirmCount = 3,
+  ) {}
 
   reset(redGoFirst = true): void {
     this.confirmed = null
@@ -87,7 +91,7 @@ export class BoardTracker {
         this.candidate = res
         this.candidateHits = 1
       }
-      if (this.candidateHits >= this.confirmCount) {
+      if (this.candidateHits >= this.initialConfirmCount) {
         const first = this.candidate
         if (first && !this.hasAcked(first.canonical)) {
           this.confirmed = first

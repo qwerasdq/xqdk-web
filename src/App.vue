@@ -23,6 +23,8 @@ import type { SyncPlan } from './vision/sync'
 import type { PendingSyncSnapshot } from './features/assist/VisionControl.vue'
 import { ucciToXY } from './xiangqi/pv'
 import {
+  cancelEngineSearch,
+  EngineSearchCancelledError,
   engineSearch,
   engineAnalyze,
   engineNewGame,
@@ -83,8 +85,14 @@ let analysisSeq = 0 // 分析代次（过期检查）
 const mySide = ref<'red' | 'black'>('red')
 const assistPlans = ref<AssistPlan[]>([])
 const plansLoading = ref(false)
+const plansCompleting = ref(false)
 const selectedPlan = ref(-1)
 let plansSeq = 0 // 预案代次（过期检查）
+
+// JJ 支招分析 time-box：实时辅助优先响应速度，不牺牲正式对弈/分析的 depth 难度
+const JJ_CANDIDATE_MOVETIME_MS = 2500
+const JJ_PLAN_OPP_MOVETIME_MS = 2500
+const JJ_PLAN_MY_MOVETIME_MS = 1500
 
 const engineReady = computed(() => engineStatus.value === 'ready')
 
@@ -276,24 +284,22 @@ async function onDifficultyChange(): Promise<void> {
 // 分析当前局面：MultiPV 3，流式更新候选（节流 100ms）
 // 位置传参：起始 FEN + 全历史（position fen <start> moves <...>），
 // 不可用「当前 FEN + 全历史」——历史着法在现局面合法时会被重复应用导致局面错误
-async function runAnalysis(): Promise<void> {
+async function runAnalysis(opts: { movetime?: number } = {}): Promise<void> {
   if (!engineReady.value) return
   const g = game.value
   const seq = ++analysisSeq
   analyzing.value = true
   try {
     await engineAnalyze(
-      {
-        fen: g.startFen,
-        moves: g.history.map((h) => h.ucciString),
-        depth: difficulty.value.depth,
-        multipv: 3,
-      },
+      opts.movetime
+        ? { fen: g.startFen, moves: g.history.map((h) => h.ucciString), movetime: opts.movetime, multipv: 3 }
+        : { fen: g.startFen, moves: g.history.map((h) => h.ucciString), depth: difficulty.value.depth, multipv: 3 },
       (lines) => {
         if (seq === analysisSeq) analysisLines.value = lines
       },
     )
   } catch (err) {
+    if (err instanceof EngineSearchCancelledError) return
     console.error('分析失败:', err)
   } finally {
     if (seq === analysisSeq) analyzing.value = false
@@ -314,23 +320,30 @@ async function runPlans(token: number): Promise<void> {
         moves: g.history.map((h) => h.ucciString),
         // 预案按时间来算，而不是固定深度：保证对方回合不会无限长考。
         // 难度仍由 Skill Level 控制（onDifficultyChange 已设置），深度不再成为瓶颈。
-        oppMovetime: 2500,
-        myMovetime: 1500,
+        oppMovetime: JJ_PLAN_OPP_MOVETIME_MS,
+        myMovetime: JJ_PLAN_MY_MOVETIME_MS,
         topN: 3,
       },
       (plan) => {
         if (!isStale()) {
           assistPlans.value = [...assistPlans.value, plan]
           // 第一条预案可用即可结束"计算中"，后续预案后台渐进补全，不阻塞 UI
-          if (assistPlans.value.length === 1) plansLoading.value = false
+          if (assistPlans.value.length === 1) {
+            plansLoading.value = false
+            plansCompleting.value = true
+          }
         }
       },
       isStale,
     )
   } catch (err) {
+    if (err instanceof EngineSearchCancelledError) return
     console.error('预案生成失败:', err)
   } finally {
-    if (token === plansSeq) plansLoading.value = false
+    if (token === plansSeq) {
+      plansLoading.value = false
+      plansCompleting.value = false
+    }
   }
 }
 
@@ -341,11 +354,12 @@ function refreshAssist(): void {
   assistPlans.value = []
   selectedPlan.value = -1
   plansLoading.value = false
+  plansCompleting.value = false
   if (!engineReady.value || game.value.isGameOver) return
   const myTurn = (game.value.currentBoard.bRedGo ? 'red' : 'black') === mySide.value
   if (myTurn) {
     selectedUcci.value = null
-    void runAnalysis()
+    void runAnalysis({ movetime: JJ_CANDIDATE_MOVETIME_MS })
   } else {
     analysisLines.value = []
     selectedUcci.value = null
@@ -434,6 +448,7 @@ async function requestAiMove(): Promise<void> {
       boardVersion.value++
     }
   } catch (err) {
+    if (err instanceof EngineSearchCancelledError) return
     console.error('AI 搜索失败:', err)
   } finally {
     aiThinking.value = false
@@ -479,6 +494,7 @@ function onCellClick(x: number, y: number): void {
 }
 
 async function newGame(): Promise<void> {
+  cancelEngineSearch()
   game.value = new Game()
   selected.value = null
   legalTargets.value = []
@@ -497,6 +513,7 @@ async function newGame(): Promise<void> {
 function undo(): void {
   const g = game.value
   if (g.history.length === 0 || g.isGameOver) return
+  cancelEngineSearch()
   if (mode.value === 'game') {
     const last = g.history[g.history.length - 1]
     if (last && !last.isRedMove) g.undoMove() // 先撤 AI 的黑方着法
@@ -518,6 +535,7 @@ function undo(): void {
 function loadFEN(): void {
   const fen = fenInput.value.trim()
   if (!fen) return
+  cancelEngineSearch()
   const g = new Game()
   if (g.restoreFromFEN(fen)) {
     game.value = g
@@ -543,6 +561,7 @@ function loadFEN(): void {
 
 function switchMode(m: Mode): void {
   if (m === mode.value) return
+  cancelEngineSearch()
   const leavingAssist = mode.value === 'assist'
   mode.value = m
   analysisLines.value = []
@@ -552,6 +571,7 @@ function switchMode(m: Mode): void {
     assistPlans.value = []
     selectedPlan.value = -1
     plansLoading.value = false
+    plansCompleting.value = false
   }
   boardVersion.value++
   const g = game.value
@@ -628,6 +648,7 @@ function switchMode(m: Mode): void {
           :lines="analysisLines"
           :plans="assistPlans"
           :plans-loading="plansLoading"
+          :plans-completing="plansCompleting"
           :analyzing="analyzing"
           :selected-ucci="selectedUcci"
           :selected-plan="selectedPlan"
