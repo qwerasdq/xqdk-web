@@ -1,6 +1,6 @@
-// 裁剪区域推导测试：外扩、帧内约束、过小回退
+// 裁剪区域推导测试：外扩、帧内约束、过小回退、分块布局
 import { describe, expect, it } from 'vitest'
-import { cropFromGrid } from './preprocess'
+import { cropFromGrid, tileRects } from './preprocess'
 
 const FRAME_W = 1080
 const FRAME_H = 2400
@@ -44,5 +44,39 @@ describe('cropFromGrid', () => {
     const c = cropFromGrid(grid(0.25, 0.25, 0.75, 0.75), FRAME_W, FRAME_H, 0)!
     expect(c.w).toBeCloseTo(0.5 * FRAME_W, 5)
     expect(c.h).toBeCloseTo(0.5 * FRAME_H, 5)
+  })
+})
+
+describe('tileRects', () => {
+  it('2×2 覆盖整帧（含重叠）', () => {
+    const rs = tileRects(FRAME_W, FRAME_H, 2, 2)
+    expect(rs.length).toBe(4)
+    // 首块左/上贴边，末块右/下贴边
+    expect(rs[0]!.x0).toBe(0)
+    expect(rs[0]!.y0).toBe(0)
+    expect(rs[3]!.x0 + rs[3]!.w).toBeCloseTo(FRAME_W, 5)
+    expect(rs[3]!.y0 + rs[3]!.h).toBeCloseTo(FRAME_H, 5)
+  })
+
+  it('相邻块有重叠（棋盘落在块边界时不会被切断）', () => {
+    const rs = tileRects(FRAME_W, FRAME_H, 2, 2, 0.1)
+    // 左右两块在 x 方向重叠
+    expect(rs[0]!.x0 + rs[0]!.w).toBeGreaterThan(rs[1]!.x0)
+    expect(rs[1]!.x0).toBeLessThan(FRAME_W / 2)
+  })
+
+  it('块面积足够大（过小的块 letterbox 后棋盘反而更小）', () => {
+    const rs = tileRects(FRAME_W, FRAME_H, 2, 2)
+    for (const r of rs) {
+      expect(r.w).toBeGreaterThan(FRAME_W / 2 - 1)
+      expect(r.h).toBeGreaterThan(FRAME_H / 2 - 1)
+    }
+  })
+
+  it('3×3 每块约 1/3 尺寸', () => {
+    const rs = tileRects(FRAME_W, FRAME_H, 3, 3, 0)
+    expect(rs.length).toBe(9)
+    expect(rs[0]!.w).toBeCloseTo(FRAME_W / 3, 5)
+    expect(rs[8]!.x0 + rs[8]!.w).toBeCloseTo(FRAME_W, 5)
   })
 })

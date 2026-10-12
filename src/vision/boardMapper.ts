@@ -1,6 +1,9 @@
 // YOLO 检测结果 → 9×10 棋盘映射，直译自 Android assist/DetectionBoardMapper.kt
-// 1. 优先用模型 board 框做网格锚点；2. 兜底用棋子中心点包围盒；3. round 取整、越界丢弃、同格留高分；
-// 4. 双王行号判朝向（帅在下=STANDARD）
+// 网格锚点优先级：① 模型 board 框（用棋子间距细化，见 refineGridByPitch）
+//                ② 上层传入的 fallbackGrid（本帧检不出框时沿用上一帧）
+//                ③ 纯棋子中心反解（分块定位帧，见 fitGridFromPieces）
+//                ④ 棋子中心包围盒（≥20 子才可信）
+// 之后：round 取整、越界丢弃、同格留高分；双王行号判朝向（帅在下=STANDARD）
 
 import * as Piece from '../xiangqi/piece'
 import type { BoardGridRect, MappedBoard, Orientation, YoloDetection } from './types'
@@ -50,6 +53,15 @@ export function map(
     bx1 = fallbackGrid.nx1 * frameW
     by1 = fallbackGrid.ny1 * frameH
     anchored = true
+  }
+  if (!anchored) {
+    // 仍无网格：用棋子中心反解（分块定位帧走到这里——块边界常把棋盘框切断）。
+    // 比下面的包围盒兜底稳：包围盒要求"检到的子刚好铺满整盘"，反解只要求等距。
+    const fitted = fitGridFromPieces(pieces)
+    if (fitted !== null) {
+      bx0 = fitted.x0; by0 = fitted.y0; bx1 = fitted.x1; by1 = fitted.y1
+      anchored = true
+    }
   }
   if (!anchored) {
     // 兜底：棋子中心包围盒（至少 20 子才可信）
@@ -145,11 +157,11 @@ function clamp(v: number, lo: number, hi: number): number {
  * 1080p 整屏 + 445px 宽棋盘时真值 400×437，检出 409×496。
  * 直接用该框均分网格会把整行棋子推到相邻行（最底行整行错位，进而抖动）。
  *
- * 修法：棋子本身就是等距网格采样点。用「相邻同排/同列棋子的最小间距」当网格步长，
- * 固定步长、最小二乘解出左上角偏移，重建网格。实测 5 种捕获构图 + 全盘/中局/残局
+ * 修法：棋子本身就是等距网格采样点。用「圆形均值扫描候选周期」反解步长与相位，
+ * 再用「罩住最多棋子」的整数偏移定出原点，重建网格。实测 5 种捕获构图 + 全盘/中局/残局
  * 全部 0 错格，而单用检出框错 12–38 格。
  *
- * guard：步长必须与棋子尺寸相容（1.0–1.8 倍棋子宽/高，象棋网格间距天然大于棋子直径），
+ * guard：步长必须与棋子尺寸相容（1.05–1.75 倍棋子宽/高，象棋网格间距天然大于棋子直径），
  * 且横纵步长之比接近 1（象棋的列距与行距实测比约 0.99–1.03，不是 9:10 的比例）。
  * 不满足则原样返回检出框——子太少或检测退化时宁可退回旧行为，也不能引入新错。
  */
@@ -158,39 +170,68 @@ export function refineGridByPitch(
   x0: number, y0: number, x1: number, y1: number,
 ): { x0: number; y0: number; x1: number; y1: number } {
   const raw = { x0, y0, x1, y1 }
-  if (pieces.length < 8) return raw
-  const priorW = (x1 - x0) / 8
-  const priorH = (y1 - y0) / 9
-  const gw = fitPitch(pieces.map((p) => p.cx), median(pieces.map((p) => p.w)), priorW)
-  const gh = fitPitch(pieces.map((p) => p.cy), median(pieces.map((p) => p.h)), priorH)
-  if (gw === null || gh === null) return raw
-  if (gw.g / gh.g < 0.7 || gw.g / gh.g > 1.3) return raw
-
-  // 相位 phi 只确定格的「相对位置」，号码（第几行/列）还需要定整数偏移。
-  // 棋盘框的**中心**是准的（实测与真值差 1–5px，而框高可高估 13%），所以用它做先验
-  // 挑偏移：只在「网格中心与框中心相差不到 0.7 格」的候选里，取落在盘内棋子最多的。
-  const ox = pickOffset(pieces.map((p) => p.cx), gw.g, gw.phi, BOARD_W, (x0 + x1) / 2)
-  const oy = pickOffset(pieces.map((p) => p.cy), gh.g, gh.phi, BOARD_H, (y0 + y1) / 2)
-  if (ox === null || oy === null) return raw
-  return { x0: ox, y0: oy, x1: ox + gw.g * 8, y1: oy + gh.g * 9 }
+  const fitted = fitGridByPitch(pieces, (x1 - x0) / 8, (y1 - y0) / 9, (x0 + x1) / 2, (y0 + y1) / 2)
+  return fitted ?? raw
 }
 
 /**
- * 在相位 phi 的等价网格（相邻候选相差整数倍步长）中挑一个原点：
- * 候选被限制在「网格中心距 boxCenter 不超过 0.7 格」内 —— 既挡住框位置不可靠带来的错位，
- * 也挡住一个恰好落在盘外一格的误检把整盘吸附偏移（只按"盘内子最多"会选错）。
- * 窗口内取盘内棋子最多者，同分取到格点残差最小者。
+ * 只用棋子中心反解网格，**不需要棋盘框**。
+ *
+ * 用途：分块扫描定位时棋盘框常被块边界切断（一块里可能只有半个棋盘），只能靠棋子本身反解。
+ *
+ * 先验的取法：包围盒跨度 ÷ 跨度内的格数。格数未知（棋子可能只占棋盘一角），
+ * 所以枚举格数 k，取残差最小的那个组合。**不能固定用 k=8/9**——只有 6 行有子时
+ * span/9 会把步长低估三分之一，先验带宽随之收死，直接拟合失败。
  */
-function pickOffset(vals: number[], g: number, phi: number, n: number, boxCenter: number): number | null {
-  const centreOffset = boxCenter - (g * (n - 1)) / 2
-  const k0 = Math.round((centreOffset - phi) / g)
+export function fitGridFromPieces(
+  pieces: YoloDetection[],
+): { x0: number; y0: number; x1: number; y1: number } | null {
+  if (pieces.length < 12) return null
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+  for (const p of pieces) {
+    if (p.cx < minX) minX = p.cx
+    if (p.cx > maxX) maxX = p.cx
+    if (p.cy < minY) minY = p.cy
+    if (p.cy > maxY) maxY = p.cy
+  }
+  const sizeW = median(pieces.map((p) => p.w))
+  const sizeH = median(pieces.map((p) => p.h))
+  const gw = fitPitchBySpan(pieces.map((p) => p.cx), sizeW, maxX - minX, BOARD_W - 1)
+  const gh = fitPitchBySpan(pieces.map((p) => p.cy), sizeH, maxY - minY, BOARD_H - 1)
+  if (gw === null || gh === null) return null
+  if (gw.g / gh.g < 0.7 || gw.g / gh.g > 1.3) return null
+
+  // 必须"钉住原点"才可信：棋子要覆盖到棋盘两端附近，否则把整盘平移一格后
+  // 棋子照样全落在盘内（投票并列），原点就是猜的 —— 实测只看到半盘时会偏 2 格。
+  // 宁可不给，也不要给一个自信的错盘：上层退回锁定网格或报"未识别到棋盘"。
+  if (maxX - minX < gw.g * (BOARD_W - 2)) return null
+  if (maxY - minY < gh.g * (BOARD_H - 2)) return null
+
+  const ox = pickOffset(pieces.map((p) => p.cx), gw.g, gw.phi, BOARD_W, (minX + maxX) / 2)
+  const oy = pickOffset(pieces.map((p) => p.cy), gh.g, gh.phi, BOARD_H, (minY + maxY) / 2)
+  if (ox === null || oy === null) return null
+  return { x0: ox, y0: oy, x1: ox + gw.g * (BOARD_W - 1), y1: oy + gh.g * (BOARD_H - 1) }
+}
+
+/**
+ * 在相位 phi 的等价网格（相邻候选相差整数倍步长）中挑一个原点。
+ *
+ * 判据：网格能罩住最多棋子者优先，同分取到格点残差最小者，再同分取最靠近参考中心者
+ * （参考中心是"棋子应该落在这个网格里"的先验）。
+ *
+ * 不设"网格中心必须贴近参考中心"的硬窗口：分块扫描只覆盖棋盘一角时，棋子包围盒中心
+ * 可以离棋盘中心好几格（实测只有下半盘时差 1.5 格），硬窗口会把正确原点挡在外面。
+ * 而"罩住最多棋子"本身就能排除被盘外误检带偏的候选——偏一格时那个误检会落到盘外。
+ */
+function pickOffset(vals: number[], g: number, phi: number, n: number, refCentre: number): number | null {
   let best: number | null = null
   let bestIn = -1
   let bestCost = Infinity
-  for (let k = k0 - 1; k <= k0 + 1; k++) {
+  let bestCentric = Infinity
+  // 候选覆盖"网格中心落在参考中心附近"的所有整数偏移，两头各留 2 格余量
+  const k0 = Math.round((refCentre - (g * (n - 1)) / 2 - phi) / g)
+  for (let k = k0 - 2; k <= k0 + 2; k++) {
     const origin = phi + k * g
-    // 网格中心与该候选中点的距离超过 0.7 格则淘汰
-    if (Math.abs(origin + (g * (n - 1)) / 2 - boxCenter) > g * 0.7) continue
     let inside = 0
     let cost = 0
     for (const v of vals) {
@@ -201,15 +242,78 @@ function pickOffset(vals: number[], g: number, phi: number, n: number, boxCenter
       }
     }
     cost = inside > 0 ? cost / inside : Infinity
-    if (inside > bestIn || (inside === bestIn && cost < bestCost)) {
+    const centric = Math.abs(origin + (g * (n - 1)) / 2 - refCentre)
+    if (
+      inside > bestIn ||
+      (inside === bestIn && cost < bestCost - 1e-9) ||
+      (inside === bestIn && Math.abs(cost - bestCost) <= 1e-9 && centric < bestCentric)
+    ) {
       bestIn = inside
       bestCost = cost
+      bestCentric = centric
       best = origin
     }
   }
   // 大部分棋子都落不进盘内 → 这次拟合不可信，退回棋盘框
   if (best === null || bestIn < vals.length * 0.6) return null
   return best
+}
+
+/**
+ * 跨度未知格数时的步长求解：枚举跨度内含的格数 k=1..maxGaps，各自拟合，
+ * 取残差最小者（并列时取步长最接近 1.2×棋子尺寸的，即象棋网格与棋子直径的实测比）。
+ */
+function fitPitchBySpan(
+  vals: number[],
+  size: number,
+  span: number,
+  maxGaps: number,
+): { g: number; phi: number } | null {
+  if (span <= 0 || size <= 0) return null
+  let best: { g: number; phi: number } | null = null
+  let bestCost = Infinity
+  for (let k = 1; k <= maxGaps; k++) {
+    const fit = fitPitch(vals, size, span / k)
+    if (fit === null) continue
+    // 重算该拟合的平均残差，用于跨 k 比较
+    let cost = 0
+    for (const v of vals) cost += Math.abs(v - fit.phi - Math.round((v - fit.phi) / fit.g) * fit.g)
+    cost /= vals.length
+    const tie = Math.abs(fit.g - size * 1.2)
+    const bestTie = best === null ? Infinity : Math.abs(best.g - size * 1.2)
+    if (cost < bestCost - 1e-9 || (Math.abs(cost - bestCost) <= 1e-9 && tie < bestTie)) {
+      bestCost = cost
+      best = fit
+    }
+  }
+  return best
+}
+
+/**
+ * 网格反解共用实现：固定周期扫描 + 相位求解 + 整数偏移投票。
+ * @param priorW/priorH 周期先验（通常为棋盘框或包围盒跨度均分），用于收窄扫描区间
+ * @param cx/cy 网格中心先验，用于在等价偏移中挑出正确编号
+ */
+function fitGridByPitch(
+  pieces: YoloDetection[],
+  priorW: number,
+  priorH: number,
+  cx: number,
+  cy: number,
+): { x0: number; y0: number; x1: number; y1: number } | null {
+  if (pieces.length < 8) return null
+  const gw = fitPitch(pieces.map((p) => p.cx), median(pieces.map((p) => p.w)), priorW)
+  const gh = fitPitch(pieces.map((p) => p.cy), median(pieces.map((p) => p.h)), priorH)
+  if (gw === null || gh === null) return null
+  if (gw.g / gh.g < 0.7 || gw.g / gh.g > 1.3) return null
+
+  // 相位 phi 只确定格的「相对位置」，号码（第几行/列）还需要定整数偏移。
+  // 中心先验是准的（实测与真值差 1–5px，而框高可高估 13%），所以用它挑偏移：
+  // 只在「网格中心与先验中心相差不到 0.7 格」的候选里，取落在盘内棋子最多的。
+  const ox = pickOffset(pieces.map((p) => p.cx), gw.g, gw.phi, BOARD_W, cx)
+  const oy = pickOffset(pieces.map((p) => p.cy), gh.g, gh.phi, BOARD_H, cy)
+  if (ox === null || oy === null) return null
+  return { x0: ox, y0: oy, x1: ox + gw.g * 8, y1: oy + gh.g * 9 }
 }
 
 /**

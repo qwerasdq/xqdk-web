@@ -40,6 +40,35 @@ export function cropFromGrid(
   return { x0: cx0, y0: cy0, w: cx1 - cx0, h: cy1 - cy0 }
 }
 
+/**
+ * 分块扫描的块布局（相邻块按 overlap 比例重叠，避免棋盘恰好落在块边界被切断）。
+ *
+ * 动机：共享「整个显示器」时棋盘往往只占几百像素，整帧 letterbox 到 640 后每子仅约 10px，
+ * 模型基本检不到（实测 1920×1080 帧内棋盘 300px → 整帧仅检出 1 子）。
+ * 分块把棋盘放大 2–3 倍到可识别尺度，实测同一几何下错格从 32 降到 4。
+ */
+export function tileRects(
+  frameW: number,
+  frameH: number,
+  nx: number,
+  ny: number,
+  overlap = 0.1,
+): CropRect[] {
+  const tw = frameW / nx
+  const th = frameH / ny
+  const out: CropRect[] = []
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const x0 = Math.max(0, ix * tw - overlap * tw)
+      const y0 = Math.max(0, iy * th - overlap * th)
+      const x1 = Math.min(frameW, (ix + 1) * tw + overlap * tw)
+      const y1 = Math.min(frameH, (iy + 1) * th + overlap * th)
+      out.push({ x0, y0, w: x1 - x0, h: y1 - y0 })
+    }
+  }
+  return out
+}
+
 /** letterbox 灰边（与训练时一致，不能用黑边） */
 export const PAD_VALUE = 114
 

@@ -139,6 +139,27 @@ export function shiftDetections(dets: YoloDetection[], dx: number, dy: number): 
   return dets.map((d) => new YoloDetection(d.labelId, d.score, d.cx + dx, d.cy + dy, d.w, d.h))
 }
 
+/**
+ * 分块推理后跨块合并：同类且中心距离小于 ratio×中位尺寸的检测视为同一目标，保留高分。
+ *
+ * 不用 IoU 而用中心距：块边界上的同一个棋子在两块里可能只被截到一角，IoU 很低但仍应合并；
+ * 象棋每一格只可能有一个子，中心距判据与"一格一子"的物理约束一致。
+ */
+export function dedupByCenter(dets: YoloDetection[], ratio = 0.5): YoloDetection[] {
+  if (dets.length === 0) return []
+  const sizes = dets.map((d) => Math.max(d.w, d.h))
+  const med = median(sizes) || 1
+  const tol = med * ratio
+  const keep: YoloDetection[] = []
+  for (const d of [...dets].sort((a, b) => b.score - a.score)) {
+    const dup = keep.some(
+      (k) => k.labelId === d.labelId && Math.hypot(d.cx - k.cx, d.cy - k.cy) < tol,
+    )
+    if (!dup) keep.push(d)
+  }
+  return keep
+}
+
 export function median(values: number[]): number {
   if (values.length === 0) return 0
   const s = [...values].sort((a, b) => a - b)

@@ -17,10 +17,20 @@ import { BoardTracker } from './boardTracker'
 import { map } from './boardMapper'
 import { CellStabilizer } from './cellStabilizer'
 import { createSession, runModel, type ModelSession } from './model'
-import { decode, shiftDetections } from './postprocess'
-import { cropFromGrid, preprocess } from './preprocess'
+import { decode, dedupByCenter, shiftDetections } from './postprocess'
+import { cropFromGrid, preprocess, tileRects } from './preprocess'
+import type { YoloDetection } from './types'
 import type { BoardGridRect, FromVisionWorker, MappedBoard, RecognitionResult, ToVisionWorker } from './types'
+import type { CropRect } from './preprocess'
 import { CELLS } from './types'
+
+/** 一次推理的产物（含各阶段耗时，用于诊断） */
+interface InferResult {
+  dets: YoloDetection[]
+  pre: number
+  infer: number
+  post: number
+}
 
 // 冷启动仍要求 3 帧（防开局误检）；已确认后的新局用 1 帧即可确认，
 // 避免 CellStabilizer 2 帧 + BoardTracker 3 帧叠加成“画面变了但一直识别中”。
@@ -28,7 +38,13 @@ const CONFIRM_FRAMES = 1
 const INITIAL_CONFIRM_FRAMES = 3
 /** 逐格去抖帧数：连续 2 帧一致才采纳该格变化（吸收走子高亮/动画/相邻格跳变造成的单帧抖动） */
 const STABILIZE_FRAMES = 2
-/** 每多少帧回退一次整帧重新定位棋盘（裁剪帧构图不同会让棋盘框漂移） */
+/**
+ * 定位帧的分块扫描格数。定位帧（无锁定网格 / 到期重定位）走分块而不是整帧：
+ * 共享整个显示器时棋盘常只占几百像素，整帧 letterbox 后每子约 10px，模型检不到；
+ * 2×2 分块把棋盘放大到可识别尺度，实测同一几何下检子数从 0–1 升到 30+。
+ */
+const TILE_N = 2
+/** 每多少帧重新分块定位一次（裁剪窗口是静态的，棋盘滚动后需要跟上） */
 const CALIBRATE_EVERY = 8
 
 let model: ModelSession | null = null
@@ -63,6 +79,45 @@ function invalidResult(reason: string, count: number): RecognitionResult {
     recognizedPieces: count,
     avgScore: 0,
   }
+}
+
+/** 单次推理：可选裁剪区域，检测框统一偏移回整帧坐标 */
+async function inferOnce(bitmap: ImageBitmap, crop: CropRect | null): Promise<InferResult> {
+  const t0 = performance.now()
+  const { data, lb, crop: used } = preprocess(bitmap, crop)
+  const t1 = performance.now()
+  const out = await runModel(model!, data)
+  const t2 = performance.now()
+  const dets = shiftDetections(decode(out, lb, used.w, used.h), used.x0, used.y0)
+  const t3 = performance.now()
+  return { dets, pre: Math.round(t1 - t0), infer: Math.round(t2 - t1), post: Math.round(t3 - t2) }
+}
+
+/**
+ * 分块扫描推理（仅定位用）：把整帧切成 n×n 小块分别推理，合并跨块检测。
+ *
+ * 为什么需要：共享整个显示器时棋盘常只占几百像素，整帧 letterbox 到 640 后每子约 10px，
+ * 模型基本检不到（实测 1920×1080 帧内棋盘 300px → 整帧仅 1 子，而 2×2 分块可检出 30+）。
+ * 只用于「定位不出棋盘」时，正常帧走裁剪单次推理，平均成本不变。
+ */
+async function inferTiled(
+  bitmap: ImageBitmap,
+  frameW: number,
+  frameH: number,
+  n: number,
+): Promise<InferResult> {
+  const acc: YoloDetection[] = []
+  let pre = 0
+  let infer = 0
+  let post = 0
+  for (const rect of tileRects(frameW, frameH, n, n)) {
+    const r = await inferOnce(bitmap, rect)
+    acc.push(...r.dets)
+    pre += r.pre
+    infer += r.infer
+    post += r.post
+  }
+  return { dets: dedupByCenter(acc), pre, infer, post }
 }
 
 function toRecognition(mapped: MappedBoard, canonicalOverride?: Uint8Array): RecognitionResult {
@@ -119,38 +174,50 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
   let unstableCells = 0
   const t = { pre: 0, infer: 0, post: 0 }
   try {
-    // 裁剪后的画面里棋盘占比大得多，模型检出的棋盘框更准（整帧小棋盘常检不出或高估框高），
-    // 所以常规帧走裁剪；每 CALIBRATE_EVERY 帧回退一次整帧，防止棋盘移出裁剪窗口后锁死。
-    const useCrop = lastGrid !== null && framesSinceCalib < CALIBRATE_EVERY
-    const crop = useCrop ? cropFromGrid(lastGrid, frameW, frameH) : null
-    const t0 = performance.now()
-    const { data, lb, crop: usedCrop } = preprocess(bitmap, crop)
-    const t1 = performance.now()
-    const out = await runModel(model, data)
-    const t2 = performance.now()
-    const dets = decode(out, lb, usedCrop.w, usedCrop.h)
-    // 裁剪坐标是 crop 局部坐标，偏移回整帧后再做棋盘映射
-    const shifted = shiftDetections(dets, usedCrop.x0, usedCrop.y0)
-    // 优先用当帧自己检出的棋盘框（高缩比下裁剪帧的框明显更准）；
-    // 本帧检不出可用框时才退回上一帧锁定的网格
-    mapped = map(shifted, frameW, frameH, 3, lastGrid)
-    const t3 = performance.now()
-    detCount = dets.length
-    t.pre = Math.round(t1 - t0)
-    t.infer = Math.round(t2 - t1)
-    t.post = Math.round(t3 - t2)
+    let r: InferResult
+    /** 本帧是否走的定位路径（整帧/分块），用于重置重定位计数 */
+    let locating = false
+    if (lastGrid !== null && framesSinceCalib < CALIBRATE_EVERY) {
+      // 已有锁定网格：按网格裁剪后单次推理（棋盘占比大，模型最准）
+      r = await inferOnce(bitmap, cropFromGrid(lastGrid, frameW, frameH))
+      mapped = map(r.dets, frameW, frameH, 3, lastGrid)
+    } else {
+      locating = true
+      // 定位帧：先整帧（棋盘填满画面时最快最准），整帧定位不出棋盘再分块扫描。
+      // 分块是给"共享整个显示器、棋盘只占几百像素"准备的——整帧 letterbox 到 640 后
+      // 每子只剩约 10px，模型检不到（实测 0–1 子）。
+      r = await inferOnce(bitmap, null)
+      mapped = map(r.dets, frameW, frameH, 3, null)
+      if (mapped === null) {
+        r = await inferTiled(bitmap, frameW, frameH, TILE_N)
+        mapped = map(r.dets, frameW, frameH, 3, null)
+        if (mapped !== null) {
+          // 分块只用来找回网格：块边界处的棋子会被截半，出局面的精度不够。
+          // 拿到网格后立刻按该网格裁剪重推一次，用裁剪帧的结果出局面。
+          const refined = await inferOnce(bitmap, cropFromGrid(mapped.grid, frameW, frameH))
+          const remapped = map(refined.dets, frameW, frameH, 3, mapped.grid)
+          if (remapped !== null) {
+            mapped = remapped
+            r = refined
+          }
+        }
+      }
+    }
+    detCount = r.dets.length
+    t.pre = r.pre
+    t.infer = r.infer
+    t.post = r.post
 
     if (mapped === null) {
-      // 识别不到：丢弃锁定网格，下一帧回退整帧重定位
+      // 定位失败：清掉网格，下一帧仍会重试定位（不会锁死）
       lastGrid = null
       framesSinceCalib = 0
       result = invalidResult('未识别到棋盘', detCount)
     } else {
-      // 每帧都用当帧定位结果更新锚点：裁剪帧的棋盘框同样准确（甚至更准），
-      // 网格随之收敛，棋盘小幅移动也能跟上。
+      // 每帧都用当帧定位结果更新锚点，网格随棋盘小幅移动收敛
       if (mapped.grid) lastGrid = mapped.grid
-      if (useCrop) framesSinceCalib++
-      else framesSinceCalib = 0
+      // 定位帧重置计数；裁剪帧递增，到期后回退到定位重定位
+      framesSinceCalib = locating ? 0 : framesSinceCalib + 1
       const stable = stabilizer.update(mapped.canonical)
       cellsStable = equal(stable, mapped.canonical)
       unstableCells = stabilizer.unstableCellCount

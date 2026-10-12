@@ -1,10 +1,11 @@
 // YOLO 输出解码与过滤测试，移植自 Android YoloPipelineTest.kt（5 用例）
 // 夹具为真实模型对 1080×2400 天天象棋开局截图的输出采样
 import { describe, expect, it } from 'vitest'
-import { ANCHORS, DIMS, decode, letterboxForFrame, shiftDetections } from './postprocess'
+import { ANCHORS, DIMS, decode, dedupByCenter, letterboxForFrame, shiftDetections } from './postprocess'
 import { map } from './boardMapper'
 import { canonicalStart, equal } from './assistBoard'
 import { FIXTURE_ROWS } from './__fixtures__/yoloRows'
+import { PIECE_CODES } from './labels'
 import { YoloDetection } from './types'
 import * as Piece from '../xiangqi/piece'
 
@@ -112,5 +113,34 @@ describe('裁剪推理坐标回偏移', () => {
     // 尺寸不变
     expect(out[1]!.w).toBe(500)
     expect(out[1]!.h).toBe(560)
+  })
+})
+
+describe('分块检测跨块合并', () => {
+  const det = (piece: number, cx: number, cy: number, score = 0.9, size = 60) =>
+    new YoloDetection(PIECE_CODES.indexOf(piece), score, cx, cy, size, size)
+
+  it('同类且中心接近的重复框合并，保留高分', () => {
+    const merged = dedupByCenter([
+      det(Piece.WJU, 100, 100, 0.7),
+      det(Piece.WJU, 112, 106, 0.95), // 距中心 13 < 0.5×60
+    ])
+    expect(merged.length).toBe(1)
+    expect(merged[0]!.score).toBe(0.95)
+  })
+
+  it('同类但相距足够远（相邻格）都保留', () => {
+    // 相邻格间距通常 > 1.2 倍棋子尺寸，远大于阈值
+    const merged = dedupByCenter([det(Piece.WJU, 100, 100), det(Piece.WJU, 172, 100)])
+    expect(merged.length).toBe(2)
+  })
+
+  it('不同类别即使重叠也各自保留（车与卒不能互相吞掉）', () => {
+    const merged = dedupByCenter([det(Piece.WJU, 100, 100), det(Piece.BZU, 104, 102)])
+    expect(merged.length).toBe(2)
+  })
+
+  it('空输入返回空', () => {
+    expect(dedupByCenter([])).toEqual([])
   })
 })

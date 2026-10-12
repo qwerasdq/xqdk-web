@@ -1,6 +1,6 @@
 // 检测 → 9×10 映射测试，移植自 Android DetectionBoardMapperTest.kt（7 用例）
 import { describe, expect, it } from 'vitest'
-import { map } from './boardMapper'
+import { fitGridFromPieces, map } from './boardMapper'
 import { canonicalStart, equal, validate } from './assistBoard'
 import { PIECE_CODES, LABEL_BOARD } from './labels'
 import { YoloDetection } from './types'
@@ -182,5 +182,36 @@ describe('检测 → 棋盘映射', () => {
       const row = Math.round((d.cy - BOARD_Y0) / CELL_H)
       expect(recovered.screenRaw[at(col, row)]).toBe(PIECE_CODES[d.labelId])
     }
+  })
+
+  it('分块定位帧：无棋盘框时用棋子中心反解网格（块边界会切断棋盘框）', () => {
+    // 分块扫描的典型情形：能检到大量棋子，但没有完整的棋盘框
+    const pieces = startDetections(false).filter((d) => !d.isBoard)
+    expect(map(pieces, FRAME_W, FRAME_H)).not.toBeNull() // 32 子时包围盒兜底也能过
+    const g = fitGridFromPieces(pieces)!
+    expect(g).not.toBeNull()
+    // 反解出的网格应与真实棋盘网格一致（允许亚像素误差）
+    expect(g.x0).toBeCloseTo(BOARD_X0, 0)
+    expect(g.y0).toBeCloseTo(BOARD_Y0, 0)
+    expect((g.x1 - g.x0) / 8).toBeCloseTo(CELL_W, 0)
+    expect((g.y1 - g.y0) / 9).toBeCloseTo(CELL_H, 0)
+  })
+
+  it('分块定位帧：只看到棋盘一角时放弃反解（原点不可辨，不猜）', () => {
+    // 3×3 分块可能只覆盖到棋盘一角：左下 5 列 × 6 行。
+    // 此时把网格整体平移一格，棋子照样全都落在盘内，原点只能靠猜 —— 实测会偏 2 格。
+    // 与其给一个"自信的错盘"，不如报未识别，让上层退回锁定网格。
+    const part = startDetections(false)
+      .filter((d) => !d.isBoard && d.cx <= BOARD_X0 + 4 * CELL_W && d.cy >= BOARD_Y0 + 3 * CELL_H)
+    expect(map(part, FRAME_W, FRAME_H)).toBeNull() // 子数不足以走包围盒兜底
+    expect(fitGridFromPieces(part)).toBeNull()
+  })
+
+  it('子数太少时反解放弃（交给上层兜底，不猜）', () => {
+    const few = [
+      pieceDet(Piece.WSHUAI, 4, 9), pieceDet(Piece.WJU, 0, 9),
+      pieceDet(Piece.BJIANG, 4, 0), pieceDet(Piece.BJU, 0, 0),
+    ]
+    expect(fitGridFromPieces(few)).toBeNull()
   })
 })
