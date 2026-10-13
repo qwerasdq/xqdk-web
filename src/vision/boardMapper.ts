@@ -13,6 +13,9 @@ import { BOARD_H, BOARD_W, CELLS } from './types'
  * @param minPieces 单帧最少棋子检测数：残局可低至 3 子（帅仕 vs 将），结构合法性交给 validate/tracker
  * @param fallbackGrid 兜底网格（归一化帧坐标）：本帧检不出可用棋盘框时（低分辨率整帧常见）
  *   才用它做格子归属；有棋盘框时以当帧为准，见下方 refineGridByPitch。
+ * @param forcedOrientation 上层锁定的朝向，给了就强制用它。朝向判据只看王落在哪一行，
+ *   单帧误检会让 canonical 整体 180° 翻转（约 40 格同时变），是"抖动很大"的主因。
+ *   锁定与滞回由上层 OrientationStabilizer 负责（本函数一帧可能被调用多次，不能在这里计数）。
  */
 export function map(
   dets: YoloDetection[],
@@ -20,6 +23,7 @@ export function map(
   frameH: number,
   minPieces = 3,
   fallbackGrid: BoardGridRect | null = null,
+  forcedOrientation: Orientation | null = null,
 ): MappedBoard | null {
   const pieces = dets.filter((d) => !d.isBoard)
   if (pieces.length < minPieces) return null
@@ -121,7 +125,8 @@ export function map(
   let pieceCount = 0
   for (let i = 0; i < CELLS; i++) if (cells[i] !== Piece.EMPTY) pieceCount++
 
-  const orientation = detectOrientation(cells) ?? 'STANDARD'
+  // 朝向：上层锁定了就用锁定值（防单帧误检把整盘翻 180°），否则按本帧王位判定
+  const orientation = forcedOrientation ?? detectOrientation(cells) ?? 'STANDARD'
   const { canonical, canonicalScores } = toCanonical(cells, cellScore, orientation)
 
   // 归一化网格（调试/遮挡判断复用），异常时置 null
@@ -318,19 +323,24 @@ function fitGridByPitch(
 
 /**
  * 一维点集 → 网格步长与相位。棋子中心在棋盘上严格落在等距格点，即使局面稀疏（残局）
- * 也能反解。做法：在 [1.05, 1.75]×棋子直径 内扫描候选周期，用圆形均值求相位，
+ * 也能反解。做法：在 [0.9, 1.75]×棋子直径 内扫描候选周期，用圆形均值求相位，
  * 取「点到最近格点」平均残差最小的周期。
  *
  * 不用「相邻同排/同列最小间距」：开局同一列的两个子常常隔 2 行（如同列的马与炮），
  * 最小间距会是 2 个格距，直接把网格撑大一倍。
  *
- * 候选区间取「棋子尺寸」与「棋盘框均分步长」两个先验的交集：前者保证不会锁到 2 倍格距
- * （象棋网格间距与棋子直径之比实测约 1.2），后者保证残局只有底两行有子时不会把行距
- * 压扁成半个格（实测棋子高度偏高估会让纯尺寸区间漏掉真值）。
+ * 候选区间取「棋子尺寸」与「棋盘框均分步长」两个先验的交集：前者保证不会锁到 2 倍格距，
+ * 后者保证残局只有底两行有子时不会把行距压扁成半个格（实测棋子高度偏高估会让纯尺寸区间
+ * 漏掉真值）。下界放到 0.9 是因为格距/棋子尺寸在不同渲染下差异很大——Android 端约 1.2，
+ * 而 JJ 模拟器实测约 0.98（棋子贴边），1.05 的下界会直接把真值排除在外。
  */
 export function fitPitch(vals: number[], size: number, prior?: number): { g: number; phi: number } | null {
   if (size <= 0 || vals.length < 4) return null
-  let lo = size * 1.05
+  // 下界 0.9×棋子尺寸：JJ 的棋子是贴边圆形立绘，检测框几乎等于格距（实测 pitch/size ≈ 0.98），
+  // 用"格距必然大于棋子直径"的物理直觉取 1.05× 会把真值挡在区间外 → 拟合失败 → 退回
+  // 高度高估 13% 的模型棋盘框 → 整行错位（实测 240×445 下第 3 帧起错 18 格，第 5 帧错 32 格）。
+  // 不会锁到"半格距"的次谐波：残差判据（bestCost）与 pickOffset 的 60% 入盘率会挡掉。
+  let lo = size * 0.9
   let hi = size * 1.75
   // 带宽放宽到 0.80×先验：棋盘框对高度的系统性高估可达 13%（见顶部说明），
   // 收得比这更紧会把真值挡在区间外，导致残局直接退回原始框。
@@ -385,6 +395,60 @@ export function gridFromPxCorners(
   if (g.nx0 < 0 || g.ny0 < 0 || g.nx1 > 1 || g.ny1 > 1) return null
   if (g.nx1 <= g.nx0 || g.ny1 <= g.ny0) return null
   return g
+}
+
+/**
+ * 朝向稳定器：锁定一次朝向，之后只在**连续多帧一致地**指向另一朝向时才切换。
+ *
+ * 为什么需要：detectOrientation 只看王在哪一行，单帧误检（红帅被检到上半盘）就会让
+ * canonical 整体 180° 翻转——约 40 格同时变，表现为"抖动很大"。JJ 对局中棋盘方向
+ * 不会中途改变，所以默认锁死，只在确实换边（用户重开/切视角）时才跟随。
+ *
+ * 冷启动：第一个能判出朝向的帧即锁定（不再要求连续 N 帧）——锁定错了会在
+ * switchFrames 帧内被纠正，但若要求连续 N 帧才锁定，开头 N 帧就一直在抖。
+ */
+export class OrientationStabilizer {
+  private locked: Orientation | null = null
+  private pending: Orientation | null = null
+  private hits = 0
+
+  constructor(private readonly switchFrames = 5) {}
+
+  reset(): void {
+    this.locked = null
+    this.pending = null
+    this.hits = 0
+  }
+
+  /** 本帧应采用（并已锁定）的朝向；返回 null 表示尚无可靠朝向，本帧走原判定 */
+  update(detected: Orientation | null): Orientation | null {
+    if (this.locked === null) {
+      // 冷启动：第一个判得出朝向的帧直接锁定
+      if (detected !== null) this.locked = detected
+      return this.locked
+    }
+    // 已锁定：只有连续多帧一致指向另一朝向才切换
+    if (detected !== null && detected !== this.locked) {
+      if (detected === this.pending) {
+        if (++this.hits >= this.switchFrames) {
+          this.locked = detected
+          this.pending = null
+          this.hits = 0
+        }
+      } else {
+        this.pending = detected
+        this.hits = 1
+      }
+    } else {
+      this.pending = null
+      this.hits = 0
+    }
+    return this.locked
+  }
+
+  get current(): Orientation | null {
+    return this.locked
+  }
 }
 
 /** 双王位置判定屏幕朝向（帅在下=STANDARD；四分支顺序与 Android 一致） */

@@ -116,6 +116,10 @@ export type FromVisionWorker =
       cellsStable: boolean
       /** 诊断用：仍有跳变迹象的格数 */
       unstableCells: number
+      /** 诊断用：仍有跳变迹象的格索引（idx = y*9+x，canonical 红在底部） */
+      unstableIndices: number[]
+      /** 诊断用：稳定盘相对上一帧变化的格数（真正流到下游的抖动，区别于被吸收的原始噪声） */
+      stableChanges: number
       timings: { pre: number; infer: number; post: number }
     }
   | { type: 'log'; text: string }

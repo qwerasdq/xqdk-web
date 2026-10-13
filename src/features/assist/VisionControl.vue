@@ -19,6 +19,10 @@ export interface FrameDiag {
   frameH: number
   cellsStable: boolean
   unstableCells: number
+  /** 仍在跳变的格索引（idx = y*9+x，canonical 红在底部），诊断用 */
+  unstableIndices: number[]
+  /** 稳定盘相对上一帧变化的格数（真正流到下游的抖动） */
+  stableChanges: number
 }
 
 const props = defineProps<{
@@ -70,10 +74,21 @@ const diagText = computed(() => {
   if (!d || props.state === 'idle' || props.state === 'loading') return ''
   const parts: string[] = []
   parts.push(d.pieceCount !== null ? `识别到 ${d.pieceCount} 子` : `检测 ${d.detections} 框`)
+  parts.push(`${d.frameW}×${d.frameH}`)
   if (d.issues.length) parts.push(`校验失败：${d.issues.join('、')}`)
   else if (d.pieceCount !== null) {
     parts.push(`候选 ${d.candidateFrames} 帧`)
-    parts.push(`去抖 ${d.cellsStable ? '已收敛' : `${d.unstableCells} 格抖动`}`)
+    // 关键区分：stableChanges 是"稳定盘相对上一帧变了多少格"——真正流到下游的抖动；
+    // unstableCells 是"原始帧与稳定盘当前不一致的格数"，其中相当一部分是被去抖吸收的
+    // 单帧噪声（且严格 A/B 交替时该标记永不清除），不等于抖动。
+    parts.push(d.stableChanges === 0 ? '输出稳定' : `输出变动 ${d.stableChanges} 格`)
+    if (!d.cellsStable && d.unstableIndices.length) {
+      const cells = d.unstableIndices
+        .slice(0, 6)
+        .map((i) => `${Math.floor(i / 9) + 1}行${(i % 9) + 1}列`)
+        .join('、')
+      parts.push(`原始帧 ${d.unstableCells} 格不一致(${cells}${d.unstableIndices.length > 6 ? '…' : ''})`)
+    }
   }
   return parts.join(' · ')
 })

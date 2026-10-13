@@ -49,6 +49,43 @@ export function matchStartCount(pieces: Uint8Array): number {
   return n
 }
 
+/** 各兵种数量上限（红黑各一套），用于超限修复 */
+export const PIECE_LIMITS: Record<number, number> = {
+  [Piece.WSHUAI]: 1, [Piece.WSHI]: 2, [Piece.WXIANG]: 2, [Piece.WMA]: 2, [Piece.WJU]: 2, [Piece.WPAO]: 2, [Piece.WBING]: 5,
+  [Piece.BJIANG]: 1, [Piece.BSHI]: 2, [Piece.BXIANG]: 2, [Piece.BMA]: 2, [Piece.BJU]: 2, [Piece.BPAO]: 2, [Piece.BZU]: 5,
+}
+
+/**
+ * 数量超限修复：某兵种超过上限时，按格置信度从低到高剔除多余的子。
+ *
+ * 动机：模型偶尔对同一兵种多吐一个框（实测红帅格上同时检出 r_pao 0.695 与 r_jiang 0.881），
+ * 多出的框落到空格就变成"卒 6 个""炮 3 个"。此前这类帧被 validate 判为无效整帧丢弃，
+ * 表现为识别断续 UNSTABLE；而盘面其实只错了一格，剔掉最低分的那个即可。
+ *
+ * 只做数量裁剪，不改动任何具体格的内容（不做"卒不该在这"这类棋规推断）——
+ * 越界/照面等仍交给 validate 拒绝。返回被剔除的格数（0 表示无超限）。
+ */
+export function repairOverflow(pieces: Uint8Array, scores: Float32Array): number {
+  const counts = new Int32Array(Piece.BZU + 1)
+  for (let i = 0; i < CELLS; i++) if (pieces[i] !== Piece.EMPTY) counts[pieces[i]!]++
+  let removed = 0
+  for (let p = Piece.WSHUAI; p <= Piece.BZU; p++) {
+    const limit = PIECE_LIMITS[p]!
+    let excess = counts[p]! - limit
+    if (excess <= 0) continue
+    // 收集该兵种所有格，按分数升序，剔掉最低的 excess 个
+    const idxs: number[] = []
+    for (let i = 0; i < CELLS; i++) if (pieces[i] === p) idxs.push(i)
+    idxs.sort((a, b) => scores[a]! - scores[b]!)
+    for (let k = 0; k < excess && k < idxs.length; k++) {
+      pieces[idxs[k]!] = Piece.EMPTY
+      scores[idxs[k]!] = 0
+      removed++
+    }
+  }
+  return removed
+}
+
 /**
  * 硬合法性校验（比 Android 多一项将帅照面检查，增强噪声拒识）：
  * 帅/将各恰好 1、各兵种数量上限、总数 ≤32、将帅同线且中间无子非法。
@@ -68,12 +105,10 @@ export function validate(pieces: Uint8Array): string[] {
   }
   if (counts[Piece.WSHUAI] !== 1) issues.push(`红帅数量异常:${counts[Piece.WSHUAI]}`)
   if (counts[Piece.BJIANG] !== 1) issues.push(`黑将数量异常:${counts[Piece.BJIANG]}`)
-  const limits: Record<number, number> = {
-    [Piece.WSHI]: 2, [Piece.WXIANG]: 2, [Piece.WMA]: 2, [Piece.WJU]: 2, [Piece.WPAO]: 2, [Piece.WBING]: 5,
-    [Piece.BSHI]: 2, [Piece.BXIANG]: 2, [Piece.BMA]: 2, [Piece.BJU]: 2, [Piece.BPAO]: 2, [Piece.BZU]: 5,
-  }
-  for (const [k, v] of Object.entries(limits)) {
+  for (const [k, v] of Object.entries(PIECE_LIMITS)) {
     const id = Number(k)
+    // 帅/将已由上面的"恰好 1 个"检查覆盖，跳过以免重复报错
+    if (id === Piece.WSHUAI || id === Piece.BJIANG) continue
     if (counts[id]! > v) issues.push(`${Piece.getNameByValue(id)}数量超限:${counts[id]}`)
   }
   let total = 0

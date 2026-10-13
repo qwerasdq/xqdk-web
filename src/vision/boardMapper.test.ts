@@ -1,6 +1,6 @@
 // 检测 → 9×10 映射测试，移植自 Android DetectionBoardMapperTest.kt（7 用例）
 import { describe, expect, it } from 'vitest'
-import { fitGridFromPieces, map } from './boardMapper'
+import { fitGridFromPieces, map, OrientationStabilizer } from './boardMapper'
 import { canonicalStart, equal, validate } from './assistBoard'
 import { PIECE_CODES, LABEL_BOARD } from './labels'
 import { YoloDetection } from './types'
@@ -184,6 +184,35 @@ describe('检测 → 棋盘映射', () => {
     }
   })
 
+  it('格距≈棋子尺寸（JJ 贴边渲染）：仍能反解网格，不退回高估的棋盘框', () => {
+    // 真实失效模式：JJ 模拟器 240×445 下棋子框中位 25.4px，而真实格距仅 24.9px
+    // （pitch/size ≈ 0.98）。fitPitch 旧下界 size*1.05 = 26.7 把真值排除 → 拟合失败 →
+    // 退回高度高估 13% 的模型棋盘框 → 顶行整行下移（实测第 3 帧起错 18 格，第 5 帧 32 格）。
+    const CELL = 25
+    const SIZE = 25.5 // 棋子框比格距还大一点点
+    const X0 = 15
+    const Y0 = 118
+    const start = canonicalStart()
+    const dets: YoloDetection[] = []
+    for (let y = 0; y < BOARD_H; y++) {
+      for (let x = 0; x < BOARD_W; x++) {
+        const p = start[y * BOARD_W + x]!
+        if (p === Piece.EMPTY) continue
+        dets.push(new YoloDetection(labelIdOf(p), 0.9, X0 + x * CELL, Y0 + y * CELL, SIZE, SIZE))
+      }
+    }
+    // 棋盘框高度高估 13%（真实捕获的已知偏差），宽度准确
+    const board = new YoloDetection(
+      LABEL_BOARD, 0.9,
+      X0 + 4 * CELL, Y0 + 4.5 * CELL * 1.13,
+      8 * CELL, 9 * CELL * 1.13,
+    )
+    const mapped = map([...dets, board], 240, 445)
+    expect(mapped).not.toBeNull()
+    expect(equal(canonicalStart(), mapped!.canonical)).toBe(true)
+    expect(mapped!.pieceCount).toBe(32)
+  })
+
   it('分块定位帧：无棋盘框时用棋子中心反解网格（块边界会切断棋盘框）', () => {
     // 分块扫描的典型情形：能检到大量棋子，但没有完整的棋盘框
     const pieces = startDetections(false).filter((d) => !d.isBoard)
@@ -213,5 +242,66 @@ describe('检测 → 棋盘映射', () => {
       pieceDet(Piece.BJIANG, 4, 0), pieceDet(Piece.BJU, 0, 0),
     ]
     expect(fitGridFromPieces(few)).toBeNull()
+  })
+})
+
+describe('朝向锁定（抖动主因）', () => {
+  // 朝向判据只看王在哪一行，单帧误检会让 canonical 整体翻 180°（约 40 格同时变），
+  // 表现为"抖动很大"。锁定后只有连续多帧一致指向另一朝向才切换。
+  it('冷启动：第一个判得出朝向的帧直接锁定', () => {
+    const s = new OrientationStabilizer(5)
+    expect(s.update('STANDARD')).toBe('STANDARD')
+    expect(s.current).toBe('STANDARD')
+  })
+
+  it('判不出朝向的帧不锁定，也不清除已有锁定', () => {
+    const s = new OrientationStabilizer(5)
+    expect(s.update(null)).toBeNull()
+    s.update('FLIPPED')
+    expect(s.update(null)).toBe('FLIPPED')
+  })
+
+  it('单帧反向误检不切换（这正是 40 格抖动被消除的原因）', () => {
+    const s = new OrientationStabilizer(5)
+    s.update('STANDARD')
+    expect(s.update('FLIPPED')).toBe('STANDARD') // 1 帧
+    expect(s.update('STANDARD')).toBe('STANDARD')
+    expect(s.update('FLIPPED')).toBe('STANDARD') // 又 1 帧
+    expect(s.current).toBe('STANDARD')
+  })
+
+  it('连续 5 帧一致反向才切换（用户确实换边时跟随）', () => {
+    const s = new OrientationStabilizer(5)
+    s.update('STANDARD')
+    for (let i = 0; i < 4; i++) expect(s.update('FLIPPED')).toBe('STANDARD')
+    expect(s.update('FLIPPED')).toBe('FLIPPED') // 第 5 帧切换
+    expect(s.current).toBe('FLIPPED')
+  })
+
+  it('切换过程中被打断则重新计数', () => {
+    const s = new OrientationStabilizer(5)
+    s.update('STANDARD')
+    s.update('FLIPPED'); s.update('FLIPPED'); s.update('FLIPPED')
+    s.update('STANDARD') // 打断
+    expect(s.update('FLIPPED')).toBe('STANDARD') // 重新从 1 计
+    expect(s.current).toBe('STANDARD')
+  })
+
+  it('reset 后重新冷启动', () => {
+    const s = new OrientationStabilizer(5)
+    s.update('STANDARD')
+    s.reset()
+    expect(s.current).toBeNull()
+    expect(s.update('FLIPPED')).toBe('FLIPPED')
+  })
+
+  it('map 收到锁定朝向时强制使用（不被本帧王位误检带偏）', () => {
+    const pieces = startDetections(true).filter((d) => !d.isBoard) // 屏幕布局是 FLIPPED
+    const auto = map(pieces, FRAME_W, FRAME_H)!
+    expect(auto.orientation).toBe('FLIPPED')
+    // 强行锁定为 STANDARD：canonical 应与开局不同（说明确实按锁定值翻转了）
+    const locked = map(pieces, FRAME_W, FRAME_H, 3, null, 'STANDARD')!
+    expect(locked.orientation).toBe('STANDARD')
+    expect(equal(canonicalStart(), locked.canonical)).toBe(false)
   })
 })

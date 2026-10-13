@@ -114,4 +114,53 @@ describe('reconcileGame', () => {
     expect(r.applied).toBe('noop')
     expect(g.currentBoard.toFENString()).toBe('rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1')
   })
+
+  // 「本来该我走却显示轮到对方」：blocked 分支的 FEN 曾用 tracker 猜的 redGo，
+  // 而首帧确认分支从不设置它，恒为初始值"红方走"。改为按 Game↔识别局面 diff 推回合。
+  it('blocked：红方刚走完 → FEN 应为黑方走', () => {
+    const g = new Game()
+    // 造一个无法用 ≤2 步合法到达的红方走子（炮移到非法格），触发 blocked
+    const weird = canonicalStart().slice()
+    weird[5 * 9 + 4] = weird[7 * 9 + 7]! // 红炮挪到 (4,5)
+    weird[7 * 9 + 7] = 0
+    const plan = planSync(g, mappedOf(weird), true)
+    expect(plan.kind).toBe('blocked')
+    expect(plan.fen).toMatch(/ b /) // diff 判定红方刚走 → 轮到黑
+  })
+
+  it('blocked：黑方刚走完 → FEN 应为红方走', () => {
+    const g = new Game()
+    const weird = canonicalStart().slice()
+    weird[4 * 9 + 4] = weird[2 * 9 + 1]! // 黑炮挪到 (4,4)
+    weird[2 * 9 + 1] = 0
+    const plan = planSync(g, mappedOf(weird), true)
+    expect(plan.kind).toBe('blocked')
+    expect(plan.fen).toMatch(/ w /)
+  })
+
+  it('blocked：识别噪声（移动方多子凭空出现）不猜轮次，退回 Game 当前行棋方', () => {
+    // 网格漂移会让整行棋子"换位"：movedSide 可能仍判出红方，但红方一侧出现多个子，
+    // 不是一次走子。此时应退回 Game 的 bRedGo，而不是按 diff 猜。
+    const g = new Game()
+    const noisy = canonicalStart().slice()
+    // 红方一侧：帅、仕、相同时"消失"（模拟整行错位）
+    noisy[9 * 9 + 4] = 0
+    noisy[9 * 9 + 3] = 0
+    noisy[9 * 9 + 5] = 0
+    const plan = planSync(g, mappedOf(noisy), false)
+    expect(plan.kind).toBe('blocked')
+    expect(plan.reason).toBe('识别与当前局面差异过大')
+    expect(plan.fen).toMatch(/ w /) // 退回 Game 当前（红方走），不按噪声 diff 猜
+  })
+
+  it('blocked：diff 判不出移动方时退回 Game 当前行棋方', () => {
+    const g = new Game()
+    // 红黑双方都有变化 → movedSide 返回 null，应退回 Game 的 bRedGo
+    const weird = canonicalStart().slice()
+    weird[5 * 9 + 4] = weird[7 * 9 + 7]!; weird[7 * 9 + 7] = 0
+    weird[4 * 9 + 4] = weird[2 * 9 + 1]!; weird[2 * 9 + 1] = 0
+    const plan = planSync(g, mappedOf(weird), false)
+    expect(plan.kind).toBe('blocked')
+    expect(plan.fen).toMatch(/ w /) // Game 当前是红方走（新局）
+  })
 })

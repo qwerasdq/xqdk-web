@@ -101,4 +101,11 @@ export class CellStabilizer {
     for (let i = 0; i < this.cells; i++) n += this.unstableCells[i]!
     return n
   }
+
+  /** 当前仍有跳变迹象的格索引（诊断用：定位具体是哪几个子在抖） */
+  get unstableIndices(): number[] {
+    const out: number[] = []
+    for (let i = 0; i < this.cells; i++) if (this.unstableCells[i]!) out.push(i)
+    return out
+  }
 }

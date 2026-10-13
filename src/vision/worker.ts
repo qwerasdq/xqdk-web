@@ -12,9 +12,9 @@
 
 declare const self: DedicatedWorkerGlobalScope
 
-import { equal, validate } from './assistBoard'
+import { equal, repairOverflow, validate } from './assistBoard'
 import { BoardTracker } from './boardTracker'
-import { map } from './boardMapper'
+import { detectOrientation, map, OrientationStabilizer } from './boardMapper'
 import { CellStabilizer } from './cellStabilizer'
 import { createSession, runModel, type ModelSession } from './model'
 import { decode, dedupByCenter, shiftDetections } from './postprocess'
@@ -53,6 +53,15 @@ let disposed = false
 let initStarted = false
 const tracker = new BoardTracker(CONFIRM_FRAMES, INITIAL_CONFIRM_FRAMES)
 const stabilizer = new CellStabilizer(CELLS, STABILIZE_FRAMES)
+
+/** 最近一次去抖后的稳定盘（诊断：区分"输出真在变"与"原始帧噪声已被吸收"） */
+let lastStable: Uint8Array | null = null
+/**
+ * 朝向锁定：只在连续多帧一致指向另一朝向时才切换。
+ * 朝向判据只看王落在哪一行，单帧误检会让 canonical 整体翻 180°（约 40 格同时变），
+ * 这是"抖动很大"的主因；JJ 对局中棋盘方向不会中途改变，故默认锁死。
+ */
+const orientationLock = new OrientationStabilizer()
 
 /** 整帧定位锁定的棋盘网格（归一化帧坐标）；裁剪帧沿用该锚点做格子归属 */
 let lastGrid: BoardGridRect | null = null
@@ -157,13 +166,13 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
   const { id, bitmap, frameW, frameH } = msg
   if (model === null) {
     bitmap.close()
-    post({ type: 'frame-result', id, error: '模型未加载', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, unstableCells: 0, timings: { pre: 0, infer: 0, post: 0 } })
+    post({ type: 'frame-result', id, error: '模型未加载', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, unstableCells: 0, unstableIndices: [], stableChanges: 0, timings: { pre: 0, infer: 0, post: 0 } })
     return
   }
   if (busy) {
     // 上一帧还在推理：丢弃本帧（主线程按节流发送，堆积说明推理慢于抽帧）
     bitmap.close()
-    post({ type: 'frame-result', id, error: 'busy', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, unstableCells: 0, timings: { pre: 0, infer: 0, post: 0 } })
+    post({ type: 'frame-result', id, error: 'busy', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, unstableCells: 0, unstableIndices: [], stableChanges: 0, timings: { pre: 0, infer: 0, post: 0 } })
     return
   }
   busy = true
@@ -172,30 +181,44 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
   let result = invalidResult('识别失败', 0)
   let cellsStable = false
   let unstableCells = 0
+  /** 稳定盘相对上一帧变化的格数（真正流到下游的抖动） */
+  let stableChanges = 0
+  /** 原始帧与稳定盘不一致的格索引（诊断用） */
+  const unstableIndices: number[] = []
   const t = { pre: 0, infer: 0, post: 0 }
   try {
     let r: InferResult
     /** 本帧是否走的定位路径（整帧/分块），用于重置重定位计数 */
     let locating = false
+    const orient = orientationLock.current
     if (lastGrid !== null && framesSinceCalib < CALIBRATE_EVERY) {
       // 已有锁定网格：按网格裁剪后单次推理（棋盘占比大，模型最准）
       r = await inferOnce(bitmap, cropFromGrid(lastGrid, frameW, frameH))
-      mapped = map(r.dets, frameW, frameH, 3, lastGrid)
+      mapped = map(r.dets, frameW, frameH, 3, lastGrid, orient)
     } else {
       locating = true
       // 定位帧：先整帧（棋盘填满画面时最快最准），整帧定位不出棋盘再分块扫描。
       // 分块是给"共享整个显示器、棋盘只占几百像素"准备的——整帧 letterbox 到 640 后
       // 每子只剩约 10px，模型检不到（实测 0–1 子）。
       r = await inferOnce(bitmap, null)
-      mapped = map(r.dets, frameW, frameH, 3, null)
-      if (mapped === null) {
+      mapped = map(r.dets, frameW, frameH, 3, null, orient)
+      // 整帧“勉强成功”并不等于精度够：1080p 共享下棋盘 400px 时，整帧能定位但会错 29 格、
+      // 只检出 19 子（探针实测）。拿到网格后立刻裁剪重推一次，用精确路径的结果出局面。
+      if (mapped !== null) {
+        const refined = await inferOnce(bitmap, cropFromGrid(mapped.grid, frameW, frameH))
+        const remapped = map(refined.dets, frameW, frameH, 3, mapped.grid, orient)
+        if (remapped !== null) {
+          mapped = remapped
+          r = refined
+        }
+      } else {
         r = await inferTiled(bitmap, frameW, frameH, TILE_N)
-        mapped = map(r.dets, frameW, frameH, 3, null)
+        mapped = map(r.dets, frameW, frameH, 3, null, orient)
         if (mapped !== null) {
           // 分块只用来找回网格：块边界处的棋子会被截半，出局面的精度不够。
           // 拿到网格后立刻按该网格裁剪重推一次，用裁剪帧的结果出局面。
           const refined = await inferOnce(bitmap, cropFromGrid(mapped.grid, frameW, frameH))
-          const remapped = map(refined.dets, frameW, frameH, 3, mapped.grid)
+          const remapped = map(refined.dets, frameW, frameH, 3, mapped.grid, orient)
           if (remapped !== null) {
             mapped = remapped
             r = refined
@@ -208,6 +231,10 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     t.infer = r.infer
     t.post = r.post
 
+    // 朝向锁定：每帧只喂一次（map 一帧可能被调用多次，计数不能放在 map 里）。
+    // 锁定值要到下一帧才生效——本帧已按原判定出的盘照用，帧间不会因判定抖动而翻盘。
+    if (mapped !== null) orientationLock.update(detectOrientation(mapped.screenRaw))
+
     if (mapped === null) {
       // 定位失败：清掉网格，下一帧仍会重试定位（不会锁死）
       lastGrid = null
@@ -218,9 +245,27 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
       if (mapped.grid) lastGrid = mapped.grid
       // 定位帧重置计数；裁剪帧递增，到期后回退到定位重定位
       framesSinceCalib = locating ? 0 : framesSinceCalib + 1
+      // 数量超限修复：模型偶尔多吐同类框（实测红帅格上同时检出低分 r_pao），
+      // 落到空格就成了"卒 6 个""炮 3 个"，此前会让整帧被 validate 丢弃。
+      // 这里按格置信度剔掉多余的，只改数量不改内容。
+      const repaired = repairOverflow(mapped.canonical, mapped.cellScores)
+      if (repaired > 0) {
+        mapped.pieceCount -= repaired
+        send(`数量超限修复：剔除 ${repaired} 个低分框`)
+      }
       const stable = stabilizer.update(mapped.canonical)
       cellsStable = equal(stable, mapped.canonical)
+      // unstableCells 是"原始帧与稳定盘当前不一致"的格数。注意它**不等于抖动**：
+      // 某格在 A/B 间严格交替时永远攒不到连续帧数，stable 停在 A 不动，该标记却永不清除。
+      // 故另算"稳定盘自身相对上一帧变了多少格"——这才是真正流到下游的抖动。
       unstableCells = stabilizer.unstableCellCount
+      if (lastStable !== null) {
+        let n = 0
+        for (let i = 0; i < CELLS; i++) if (stable[i] !== lastStable[i]) n++
+        stableChanges = n
+      }
+      lastStable = stable.slice()
+      for (let i = 0; i < CELLS; i++) if (mapped.canonical[i] !== stable[i]) unstableIndices.push(i)
       // 稳定盘喂 tracker；原始盘不一致时 UI 能看到“有变化”，
       // tracker 仍按候选/确认流程处理，避免真实走子被误判为不稳定。
       result = toRecognition(mapped, stable)
@@ -251,6 +296,8 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     frameH,
     cellsStable,
     unstableCells,
+    unstableIndices,
+    stableChanges,
     timings: t,
   })
 }
@@ -267,6 +314,7 @@ self.onmessage = (e: MessageEvent<ToVisionWorker>): void => {
     case 'reset':
       tracker.reset()
       stabilizer.reset()
+      orientationLock.reset()
       lastGrid = null
       framesSinceCalib = 0
       break
@@ -280,6 +328,7 @@ self.onmessage = (e: MessageEvent<ToVisionWorker>): void => {
       model = null
       tracker.reset()
       stabilizer.reset()
+      orientationLock.reset()
       lastGrid = null
       framesSinceCalib = 0
       break

@@ -12,7 +12,7 @@ import { Position } from '../xiangqi/position'
 import { legalMoves } from '../xiangqi/rule'
 import { Board } from '../xiangqi/board'
 import * as Piece from '../xiangqi/piece'
-import { toFen } from './assistBoard'
+import { movedSide, toFen } from './assistBoard'
 import type { MappedBoard } from './types'
 import { BOARD_H, BOARD_W, CELLS } from './types'
 
@@ -119,6 +119,33 @@ export function findSyncPath(g: SyncGame, target: Uint8Array, maxPlies = 2): Sea
 }
 
 /**
+ * diff 是否只是"移动方走了一步"（含吃子）：移动方一侧新增恰好 1 子、移除 0 或 1 子，
+ * 且另一侧完全不动。噪声（网格整行漂移、误检增删）会违反这一点。
+ */
+function isSingleMoveDiff(oldP: Uint8Array, newP: Uint8Array, moved: 'red' | 'black'): boolean {
+  let addedByMover = 0
+  let removedByMover = 0
+  let addedByOther = 0
+  let removedByOther = 0
+  for (let i = 0; i < CELLS; i++) {
+    const o = oldP[i]!
+    const n = newP[i]!
+    if (o === n) continue
+    if (n !== Piece.EMPTY) {
+      if ((Piece.isRed(n) ? 'red' : 'black') === moved) addedByMover++
+      else addedByOther++
+    }
+    if (o !== Piece.EMPTY) {
+      if ((Piece.isRed(o) ? 'red' : 'black') === moved) removedByMover++
+      else removedByOther++
+    }
+  }
+  // 移动方恰好落 1 子（起格清空 0/1）；对方不新增，最多被吃 1 子。
+  // 噪声（网格整行漂移、误检增删）会破坏这个形状。
+  return addedByMover === 1 && removedByMover <= 1 && addedByOther === 0 && removedByOther <= 1
+}
+
+/**
  * 计算调和计划：
  * - noop = 没变化/长度异常；
  * - move = 找到合法走法路径（未实际执行）；
@@ -136,9 +163,21 @@ export function planSync(g: SyncGame, mapped: MappedBoard, redGo: boolean): Sync
   if (path) return { kind: 'move', path }
 
   // 不再自动 reload：识别结果不能由当前局面合法到达时，需要人工确认，避免单帧/连续错检直接覆盖盘面。
-  const fen = toFen(canonical, redGo)
+  //
+  // 轮到谁走：这一步必须自己判，不能用 tracker 的 redGo —— 它是猜的（首帧确认分支从不设置，
+  // 恒为初始值"红方走"），而"确认同步"正是走这条路，于是常出现"本来该我走却显示轮到对方"。
+  // 判据：把当前 Game 局面与识别局面做 diff，能判出刚才是谁走的，下一手就是另一方。
+  // diff 不干净（两方都有变化）时退回 Game 当前行棋方——它至少由真实落子推出来，比硬编码猜测可靠。
+  //
+  // 另加一道噪声护栏：blocked 的典型成因是识别错（网格漂移/误检），此时 diff 出的"移动方"
+  // 不可信。diff 里移动方一侧只应出现"1 子移位"（起点空、终点有子），若该侧有多个子凭空
+  // 出现或消失，说明是噪声而非走子，退回 Game 当前行棋方，不要猜。
+  const moved = movedSide(current, canonical)
+  const noisy = moved !== null && !isSingleMoveDiff(current, canonical, moved)
+  const nextRedGo = moved === null || noisy ? g.currentBoard.bRedGo : moved !== 'red'
+  const fen = toFen(canonical, nextRedGo)
   if (!fen) return { kind: 'noop', reason: 'FEN 生成失败' }
-  return { kind: 'blocked', fen, reason: '无法用合法走法到达' }
+  return { kind: 'blocked', fen, reason: noisy ? '识别与当前局面差异过大' : '无法用合法走法到达' }
 }
 
 /**

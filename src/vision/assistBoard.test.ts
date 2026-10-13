@@ -7,6 +7,7 @@ import {
   equal,
   movedSide,
   piecesFromFen,
+  repairOverflow,
   toFen,
   validate,
 } from './assistBoard'
@@ -72,6 +73,31 @@ describe('AssistBoard（移植自 AssistCoreTest）', () => {
     const tooMany = start.slice()
     tooMany[at(4, 5)] = Piece.WPAO // 三个红炮
     expect(validate(tooMany).some((s) => s.includes('炮'))).toBe(true)
+  })
+
+  it('repairOverflow 按低分剔除超限兵种（卒 6 个 → 剔掉最低分那个）', () => {
+    const b = canonicalStart()
+    const s = new Float32Array(90).fill(0.9)
+    // 多塞一个卒到空位，分数最低
+    b[at(4, 4)] = Piece.BZU
+    s[at(4, 4)] = 0.65
+    expect(validate(b).some((x) => x.includes('卒'))).toBe(true)
+
+    const removed = repairOverflow(b, s)
+    expect(removed).toBe(1)
+    expect(b[at(4, 4)]).toBe(Piece.EMPTY) // 最低分的被剔
+    expect(validate(b)).toEqual([])
+    // 原有 5 个卒一个不少
+    let zu = 0
+    for (const p of b) if (p === Piece.BZU) zu++
+    expect(zu).toBe(5)
+  })
+
+  it('repairOverflow 不触碰未超限的局面', () => {
+    const b = canonicalStart()
+    const s = new Float32Array(90).fill(0.9)
+    expect(repairOverflow(b, s)).toBe(0)
+    expect(equal(b, canonicalStart())).toBe(true)
   })
 
   it('validate 识别将帅照面', () => {
