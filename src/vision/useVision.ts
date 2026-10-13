@@ -22,6 +22,8 @@ export interface VisionHandlers {
     mapped: MappedBoard | null,
     movedSide: 'red' | 'black' | null,
     redGo: boolean,
+    /** redGo 是否可信（由连续局面 diff 推出过）；false 时上层应回退 Game 的行棋方 */
+    redGoKnown: boolean,
   ) => void
   onError?: (message: string) => void
 }
@@ -139,7 +141,7 @@ export function useVision(modelUrl: string, ortDir: string, handlers: VisionHand
           unstableIndices: msg.unstableIndices ?? [],
           stableChanges: msg.stableChanges ?? 0,
         }
-        handlers.onFrame?.(msg.event, msg.mapped, msg.movedSide, msg.redGo)
+        handlers.onFrame?.(msg.event, msg.mapped, msg.movedSide, msg.redGo, msg.redGoKnown)
         break
       case 'log':
         // 保留调试通道，默认不显示

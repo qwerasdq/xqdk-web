@@ -45,8 +45,23 @@ export function map(
     const ratio = (x1 - x0) / (y1 - y0)
     if (ratio >= 0.7 && ratio <= 1.3 && x1 - x0 >= avgW * 7 && y1 - y0 >= avgH * 8) {
       const refined = refineGridByPitch(pieces, x0, y0, x1, y1)
-      bx0 = refined.x0; by0 = refined.y0; bx1 = refined.x1; by1 = refined.y1
-      anchored = true
+      if (refined !== null) {
+        bx0 = refined.x0; by0 = refined.y0; bx1 = refined.x1; by1 = refined.y1
+        anchored = true
+      } else if (fallbackGrid) {
+        // 拟合失败（子太少/检测退化）时，**宁可沿用上一帧锁定网格，也不要退回模型框**：
+        // 该框高度系统性高估约 13%（见 refineGridByPitch 注释），直接均分会让整行错位——
+        // 这正是"抖动 40"的成因。锁定网格至少是上一帧反解出来的真网格。
+        bx0 = fallbackGrid.nx0 * frameW
+        by0 = fallbackGrid.ny0 * frameH
+        bx1 = fallbackGrid.nx1 * frameW
+        by1 = fallbackGrid.ny1 * frameH
+        anchored = true
+      } else {
+        // 定位帧没有锁定网格可用，只能用它（随后 worker 会按该网格裁剪重推）
+        bx0 = x0; by0 = y0; bx1 = x1; by1 = y1
+        anchored = true
+      }
     }
   }
   if (!anchored && fallbackGrid) {
@@ -149,6 +164,7 @@ export function map(
     grid,
     pieceCount,
     avgScore: pieceCount > 0 ? scoreSum / pieceCount : 0,
+    pieceSize: median(pieces.map((d) => Math.max(d.w, d.h))),
     dropped,
   }
 }
@@ -166,17 +182,17 @@ function clamp(v: number, lo: number, hi: number): number {
  * 再用「罩住最多棋子」的整数偏移定出原点，重建网格。实测 5 种捕获构图 + 全盘/中局/残局
  * 全部 0 错格，而单用检出框错 12–38 格。
  *
- * guard：步长必须与棋子尺寸相容（1.05–1.75 倍棋子宽/高，象棋网格间距天然大于棋子直径），
+ * guard：步长必须与棋子尺寸相容（0.9–1.75 倍棋子宽/高），
  * 且横纵步长之比接近 1（象棋的列距与行距实测比约 0.99–1.03，不是 9:10 的比例）。
- * 不满足则原样返回检出框——子太少或检测退化时宁可退回旧行为，也不能引入新错。
+ *
+ * @returns 细化成功返回新网格；失败返回 **null**（调用方决定退回锁定网格还是原始框）。
+ *   不在这里退回原始框：该框高度系统性高估 13%，调用方直接用它会让整行错位。
  */
 export function refineGridByPitch(
   pieces: YoloDetection[],
   x0: number, y0: number, x1: number, y1: number,
-): { x0: number; y0: number; x1: number; y1: number } {
-  const raw = { x0, y0, x1, y1 }
-  const fitted = fitGridByPitch(pieces, (x1 - x0) / 8, (y1 - y0) / 9, (x0 + x1) / 2, (y0 + y1) / 2)
-  return fitted ?? raw
+): { x0: number; y0: number; x1: number; y1: number } | null {
+  return fitGridByPitch(pieces, (x1 - x0) / 8, (y1 - y0) / 9, (x0 + x1) / 2, (y0 + y1) / 2)
 }
 
 /**

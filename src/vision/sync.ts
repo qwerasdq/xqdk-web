@@ -152,7 +152,12 @@ function isSingleMoveDiff(oldP: Uint8Array, newP: Uint8Array, moved: 'red' | 'bl
  * - blocked = 无法用合法走法到达，不应自动改盘，需人工确认；
  * - reload = 仅用于 reconcileGame 内部异常时（合法路径执行失败），主线程仍需按 blocked 处理。
  */
-export function planSync(g: SyncGame, mapped: MappedBoard, redGo: boolean): SyncPlan {
+export function planSync(
+  g: SyncGame,
+  mapped: MappedBoard,
+  redGo: boolean,
+  redGoKnown = true,
+): SyncPlan {
   const canonical = mapped.canonical
   if (canonical.length !== CELLS) return { kind: 'noop', reason: '识别结果长度异常' }
 
@@ -164,17 +169,21 @@ export function planSync(g: SyncGame, mapped: MappedBoard, redGo: boolean): Sync
 
   // 不再自动 reload：识别结果不能由当前局面合法到达时，需要人工确认，避免单帧/连续错检直接覆盖盘面。
   //
-  // 轮到谁走：这一步必须自己判，不能用 tracker 的 redGo —— 它是猜的（首帧确认分支从不设置，
-  // 恒为初始值"红方走"），而"确认同步"正是走这条路，于是常出现"本来该我走却显示轮到对方"。
-  // 判据：把当前 Game 局面与识别局面做 diff，能判出刚才是谁走的，下一手就是另一方。
-  // diff 不干净（两方都有变化）时退回 Game 当前行棋方——它至少由真实落子推出来，比硬编码猜测可靠。
+  // 轮到谁走：这一步必须自己判，不能用 tracker 的 redGo 硬顶 —— 首帧确认分支没有前一局面可比，
+  // 只能沿用初值"红方走"（从中局开始识别时必错），而"确认同步"常走这条路。
+  // 判据优先级：
+  //   ① 局面 diff 干净（就是"移动方走了 1 子"）→ 用 movedSide，下一手是另一方。最可靠。
+  //   ② diff 脏（两方都有变化 / 网格漂移）→ 用 tracker 的 redGo。它是识别流自己一步步
+  //      累计出来的，与 Game 是否落后无关；仅当它从未被推出过（redGoKnown=false）才不可信。
+  //   ③ 都没有 → 退回 Game.bRedGo。
   //
-  // 另加一道噪声护栏：blocked 的典型成因是识别错（网格漂移/误检），此时 diff 出的"移动方"
-  // 不可信。diff 里移动方一侧只应出现"1 子移位"（起点空、终点有子），若该侧有多个子凭空
-  // 出现或消失，说明是噪声而非走子，退回 Game 当前行棋方，不要猜。
+  // 注意 ③ 单独用是**系统性差一手**的：Game 停在"上一次成功同步的局面"，比识别局面少一手，
+  // 它的 bRedGo 是"刚才该谁走"，而不是"现在该谁走"。旧代码直接用它，正是"本来该我走却显示
+  // 轮到对方"的成因。
   const moved = movedSide(current, canonical)
   const noisy = moved !== null && !isSingleMoveDiff(current, canonical, moved)
-  const nextRedGo = moved === null || noisy ? g.currentBoard.bRedGo : moved !== 'red'
+  const nextRedGo =
+    moved !== null && !noisy ? moved !== 'red' : redGoKnown ? redGo : g.currentBoard.bRedGo
   const fen = toFen(canonical, nextRedGo)
   if (!fen) return { kind: 'noop', reason: 'FEN 生成失败' }
   return { kind: 'blocked', fen, reason: noisy ? '识别与当前局面差异过大' : '无法用合法走法到达' }

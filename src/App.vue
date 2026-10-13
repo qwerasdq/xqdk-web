@@ -115,11 +115,11 @@ const visionPendingSnapshot = computed<PendingSyncSnapshot | null>(() => {
 })
 
 const vision = useVision(MODEL_URL, ORT_DIR, {
-  onFrame: (event, mapped, movedSide, redGo) => {
+  onFrame: (event, mapped, movedSide, redGo, redGoKnown) => {
     if (event !== 'NEW_BOARD' && event !== 'NEW_GAME') return
     if (!mapped || !game.value) return
     const g = game.value
-    const plan = planSync(g, mapped, redGo)
+    const plan = planSync(g, mapped, redGo, redGoKnown)
 
     // 新对局：按屏幕朝向自动判定我方（STANDARD=红在下方→我方红；FLIPPED→我方黑）
     if (event === 'NEW_GAME' && mapped) {

@@ -18,7 +18,7 @@ import { detectOrientation, map, OrientationStabilizer } from './boardMapper'
 import { CellStabilizer } from './cellStabilizer'
 import { createSession, runModel, type ModelSession } from './model'
 import { decode, dedupByCenter, shiftDetections } from './postprocess'
-import { cropFromGrid, preprocess, tileRects } from './preprocess'
+import { cropForPieceScale, preprocess, tileRects } from './preprocess'
 import type { YoloDetection } from './types'
 import type { BoardGridRect, FromVisionWorker, MappedBoard, RecognitionResult, ToVisionWorker } from './types'
 import type { CropRect } from './preprocess'
@@ -65,6 +65,8 @@ const orientationLock = new OrientationStabilizer()
 
 /** 整帧定位锁定的棋盘网格（归一化帧坐标）；裁剪帧沿用该锚点做格子归属 */
 let lastGrid: BoardGridRect | null = null
+/** 最近一次定位帧检出的棋子中位边长（原始帧像素），用于把裁剪尺度对准训练分布 */
+let lastPieceSize = 0
 /** 距上次整帧校准的帧数 */
 let framesSinceCalib = 0
 
@@ -166,13 +168,13 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
   const { id, bitmap, frameW, frameH } = msg
   if (model === null) {
     bitmap.close()
-    post({ type: 'frame-result', id, error: '模型未加载', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, unstableCells: 0, unstableIndices: [], stableChanges: 0, timings: { pre: 0, infer: 0, post: 0 } })
+    post({ type: 'frame-result', id, error: '模型未加载', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, redGoKnown: tracker.redGoKnown, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, unstableCells: 0, unstableIndices: [], stableChanges: 0, timings: { pre: 0, infer: 0, post: 0 } })
     return
   }
   if (busy) {
     // 上一帧还在推理：丢弃本帧（主线程按节流发送，堆积说明推理慢于抽帧）
     bitmap.close()
-    post({ type: 'frame-result', id, error: 'busy', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, unstableCells: 0, unstableIndices: [], stableChanges: 0, timings: { pre: 0, infer: 0, post: 0 } })
+    post({ type: 'frame-result', id, error: 'busy', detections: 0, mapped: null, event: 'UNSTABLE', movedSide: null, redGo: tracker.redGo, redGoKnown: tracker.redGoKnown, unstableStreak: tracker.unstableStreak, pieceCount: null, issues: [], candidateFrames: tracker.candidateFrames, frameW, frameH, cellsStable: false, unstableCells: 0, unstableIndices: [], stableChanges: 0, timings: { pre: 0, infer: 0, post: 0 } })
     return
   }
   busy = true
@@ -192,8 +194,8 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     let locating = false
     const orient = orientationLock.current
     if (lastGrid !== null && framesSinceCalib < CALIBRATE_EVERY) {
-      // 已有锁定网格：按网格裁剪后单次推理（棋盘占比大，模型最准）
-      r = await inferOnce(bitmap, cropFromGrid(lastGrid, frameW, frameH))
+      // 已有锁定网格：按目标尺度裁剪后单次推理（裁剪区域让棋子落在训练尺度上）
+      r = await inferOnce(bitmap, cropForPieceScale(lastGrid, lastPieceSize, frameW, frameH))
       mapped = map(r.dets, frameW, frameH, 3, lastGrid, orient)
     } else {
       locating = true
@@ -202,22 +204,29 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
       // 每子只剩约 10px，模型检不到（实测 0–1 子）。
       r = await inferOnce(bitmap, null)
       mapped = map(r.dets, frameW, frameH, 3, null, orient)
-      // 整帧“勉强成功”并不等于精度够：1080p 共享下棋盘 400px 时，整帧能定位但会错 29 格、
-      // 只检出 19 子（探针实测）。拿到网格后立刻裁剪重推一次，用精确路径的结果出局面。
+      // 整帧“勉强成功”并不等于精度够：1080p 共享下棋盘 400px 时，整帧 letterbox 后每子仅
+      // 约 16px（训练尺度 25–37px 之外），会错 13 格。拿到网格后按**目标尺度**重裁一次。
+      // 注意不是"紧贴棋盘裁剪"：那样裁剪区域随棋盘大小变，棋子尺度跟着漂到 51–67px
+      // （分布外），反而串类（黑车→卒、象/马/炮互串）。模拟器 240×445 整帧本就是 37px，
+      // cropForPieceScale 会返回 null，直接用整帧结果。
       if (mapped !== null) {
-        const refined = await inferOnce(bitmap, cropFromGrid(mapped.grid, frameW, frameH))
-        const remapped = map(refined.dets, frameW, frameH, 3, mapped.grid, orient)
-        if (remapped !== null) {
-          mapped = remapped
-          r = refined
+        const crop = cropForPieceScale(mapped.grid, mapped.pieceSize, frameW, frameH)
+        if (crop !== null) {
+          const refined = await inferOnce(bitmap, crop)
+          const remapped = map(refined.dets, frameW, frameH, 3, mapped.grid, orient)
+          if (remapped !== null) {
+            mapped = remapped
+            r = refined
+          }
         }
       } else {
         r = await inferTiled(bitmap, frameW, frameH, TILE_N)
         mapped = map(r.dets, frameW, frameH, 3, null, orient)
         if (mapped !== null) {
           // 分块只用来找回网格：块边界处的棋子会被截半，出局面的精度不够。
-          // 拿到网格后立刻按该网格裁剪重推一次，用裁剪帧的结果出局面。
-          const refined = await inferOnce(bitmap, cropFromGrid(mapped.grid, frameW, frameH))
+          // 拿到网格后按目标尺度重裁一次出局面。
+          const crop = cropForPieceScale(mapped.grid, mapped.pieceSize, frameW, frameH)
+          const refined = await inferOnce(bitmap, crop)
           const remapped = map(refined.dets, frameW, frameH, 3, mapped.grid, orient)
           if (remapped !== null) {
             mapped = remapped
@@ -238,11 +247,15 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     if (mapped === null) {
       // 定位失败：清掉网格，下一帧仍会重试定位（不会锁死）
       lastGrid = null
+      lastPieceSize = 0
       framesSinceCalib = 0
       result = invalidResult('未识别到棋盘', detCount)
     } else {
       // 每帧都用当帧定位结果更新锚点，网格随棋盘小幅移动收敛
       if (mapped.grid) lastGrid = mapped.grid
+      // 尺度锚点只在定位帧更新：裁剪帧的 pieceSize 是"裁剪后"的尺度，再拿它算下一次
+      // 裁剪会形成正反馈（裁剪→棋子变大→裁得更小→更大…）。定位帧量到的是帧域真值。
+      if (locating && mapped.pieceSize > 0) lastPieceSize = mapped.pieceSize
       // 定位帧重置计数；裁剪帧递增，到期后回退到定位重定位
       framesSinceCalib = locating ? 0 : framesSinceCalib + 1
       // 数量超限修复：模型偶尔多吐同类框（实测红帅格上同时检出低分 r_pao），
@@ -288,6 +301,7 @@ async function handleFrame(msg: Extract<ToVisionWorker, { type: 'frame' }>): Pro
     event,
     movedSide,
     redGo: tracker.redGo,
+    redGoKnown: tracker.redGoKnown,
     unstableStreak: tracker.unstableStreak,
     pieceCount: mapped ? mapped.pieceCount : null,
     issues: result.issues,
@@ -316,6 +330,7 @@ self.onmessage = (e: MessageEvent<ToVisionWorker>): void => {
       stabilizer.reset()
       orientationLock.reset()
       lastGrid = null
+      lastPieceSize = 0
       framesSinceCalib = 0
       break
     case 'ack-decision':
@@ -330,6 +345,7 @@ self.onmessage = (e: MessageEvent<ToVisionWorker>): void => {
       stabilizer.reset()
       orientationLock.reset()
       lastGrid = null
+      lastPieceSize = 0
       framesSinceCalib = 0
       break
   }

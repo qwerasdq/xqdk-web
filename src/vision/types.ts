@@ -58,6 +58,11 @@ export interface MappedBoard {
   grid: BoardGridRect | null
   pieceCount: number
   avgScore: number
+  /**
+   * 棋子框的中位边长（原始帧像素）。用于把裁剪尺度对准模型训练分布：
+   * 裁剪后棋子落在 640 输入里的像素数应接近 TARGET_PIECE_PX，过大会串类。
+   */
+  pieceSize: number
   /** 被丢弃的越界棋子数（同格冲突的低分覆盖不计数，与 Android 一致） */
   dropped: number
 }
@@ -102,6 +107,8 @@ export type FromVisionWorker =
       movedSide: 'red' | 'black' | null
       /** tracker 推断的当前行棋方（协同步 / UI 显示用，权威以 Game 为准） */
       redGo: boolean
+      /** redGo 是否由连续局面 diff 真正推出过（false = 首帧沿用初值，不可信，需回退 Game） */
+      redGoKnown: boolean
       unstableStreak: number
       /** 诊断用：本帧识别棋子数（未映射时为 null） */
       pieceCount: number | null

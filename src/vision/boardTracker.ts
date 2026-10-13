@@ -10,6 +10,14 @@ export class BoardTracker {
   confirmed: RecognitionResult | null = null
   /** 红方走子方（提示用；Game 的 bRedGo 才是权威） */
   redGo = true
+  /**
+   * redGo 是否已由「连续局面 diff」真正推出来过。
+   *
+   * 首帧确认分支没有前一局面可比，只能沿用初值（恒为"红方走"）——从中局开始识别时这是错的。
+   * 上层据此决定信不信 redGo：known 时用它（识别流自己的连续状态，与 Game 是否落后无关），
+   * 未知时退回 Game 的行棋方（用户手动摆盘时可靠）。
+   */
+  redGoKnown = false
   /** 连续未确认帧数（用于提示） */
   unstableStreak = 0
 
@@ -40,6 +48,7 @@ export class BoardTracker {
     this.candidateHits = 0
     this.unstableStreak = 0
     this.redGo = redGoFirst
+    this.redGoKnown = false
     this.lastMovedSide = null
     this.ackedApplied = null
     this.ackedDiscarded = null
@@ -69,6 +78,7 @@ export class BoardTracker {
   restore(result: RecognitionResult, redGoSide: boolean): void {
     this.confirmed = result
     this.redGo = redGoSide
+    this.redGoKnown = true
     this.candidate = null
     this.candidateHits = 0
     this.unstableStreak = 0
@@ -98,7 +108,12 @@ export class BoardTracker {
           this.candidate = null
           this.candidateHits = 0
           this.unstableStreak = 0
-          return matchStartCount(first.canonical) >= 32 ? 'NEW_GAME' : 'NEW_BOARD'
+          // 首帧没有前一局面可比，redGo 只能沿用初值。只有"与开局完全一致"时它才必然正确
+          // （开局恒红先），中局起识别则无从判断，标记为未知交给上层回退。
+          const isStart = matchStartCount(first.canonical) >= 32
+          this.redGo = true
+          this.redGoKnown = isStart
+          return isStart ? 'NEW_GAME' : 'NEW_BOARD'
         }
         // 已处理过的同一快照不再重复提示
         this.candidate = null
@@ -114,6 +129,7 @@ export class BoardTracker {
     if (matchStartCount(res.canonical) >= 32 && !equal(res.canonical, prev.canonical)) {
       this.confirmed = res
       this.redGo = true
+      this.redGoKnown = false
       this.candidate = null
       this.candidateHits = 0
       this.unstableStreak = 0

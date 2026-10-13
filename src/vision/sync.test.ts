@@ -16,6 +16,7 @@ function mappedOf(canonical: Uint8Array): MappedBoard {
     avgScore: 0.9,
     dropped: 0,
     grid: null,
+    pieceSize: 0,
   }
 }
 
@@ -138,29 +139,43 @@ describe('reconcileGame', () => {
     expect(plan.fen).toMatch(/ w /)
   })
 
-  it('blocked：识别噪声（移动方多子凭空出现）不猜轮次，退回 Game 当前行棋方', () => {
+  it('blocked：识别噪声（移动方多子凭空出现）不按 diff 猜轮次', () => {
     // 网格漂移会让整行棋子"换位"：movedSide 可能仍判出红方，但红方一侧出现多个子，
-    // 不是一次走子。此时应退回 Game 的 bRedGo，而不是按 diff 猜。
+    // 不是一次走子。此时不能用 diff 推轮次。
     const g = new Game()
     const noisy = canonicalStart().slice()
     // 红方一侧：帅、仕、相同时"消失"（模拟整行错位）
     noisy[9 * 9 + 4] = 0
     noisy[9 * 9 + 3] = 0
     noisy[9 * 9 + 5] = 0
-    const plan = planSync(g, mappedOf(noisy), false)
+    // tracker 已由之前的连续 diff 推出"轮到黑方" → 用它，而不是噪声 diff
+    const plan = planSync(g, mappedOf(noisy), false, true)
     expect(plan.kind).toBe('blocked')
     expect(plan.reason).toBe('识别与当前局面差异过大')
-    expect(plan.fen).toMatch(/ w /) // 退回 Game 当前（红方走），不按噪声 diff 猜
+    expect(plan.fen).toMatch(/ b /)
   })
 
-  it('blocked：diff 判不出移动方时退回 Game 当前行棋方', () => {
-    const g = new Game()
-    // 红黑双方都有变化 → movedSide 返回 null，应退回 Game 的 bRedGo
+  it('blocked：redGo 未知时退回 Game 当前行棋方', () => {
+    // 首帧确认（无前一局面可比）时 tracker 的 redGo 只是初值，不可信 → 退回 Game。
+    const g = new Game() // 新局，红方走
+    const weird = canonicalStart().slice()
+    // 红黑双方都有变化 → movedSide 返回 null
+    weird[5 * 9 + 4] = weird[7 * 9 + 7]!; weird[7 * 9 + 7] = 0
+    weird[4 * 9 + 4] = weird[2 * 9 + 1]!; weird[2 * 9 + 1] = 0
+    const plan = planSync(g, mappedOf(weird), false, false)
+    expect(plan.kind).toBe('blocked')
+    expect(plan.fen).toMatch(/ w /)
+  })
+
+  it('blocked：diff 判不出移动方但 redGo 已知 → 用 tracker 的行棋方（Game 可能落后一手）', () => {
+    // Game 停在上一次同步的局面，比识别局面少一手：直接用 Game.bRedGo 会系统性差一手，
+    // 这正是"本来该我走却显示轮到对方"的成因。tracker 的 redGo 由连续 diff 累计，与 Game 无关。
+    const g = new Game() // Game 的红方走
     const weird = canonicalStart().slice()
     weird[5 * 9 + 4] = weird[7 * 9 + 7]!; weird[7 * 9 + 7] = 0
     weird[4 * 9 + 4] = weird[2 * 9 + 1]!; weird[2 * 9 + 1] = 0
-    const plan = planSync(g, mappedOf(weird), false)
+    const plan = planSync(g, mappedOf(weird), false, true) // tracker 说轮到黑方
     expect(plan.kind).toBe('blocked')
-    expect(plan.fen).toMatch(/ w /) // Game 当前是红方走（新局）
+    expect(plan.fen).toMatch(/ b /)
   })
 })

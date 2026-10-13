@@ -144,6 +144,7 @@ describe('useVision', () => {
       event: 'UNSTABLE',
       movedSide: null,
       redGo: true,
+      redGoKnown: false,
       unstableStreak: 7,
       pieceCount: null,
       issues: ['未识别到棋盘'],

@@ -4,6 +4,7 @@
 // ONNX 导出为 NCHW，按 NHWC 填数据会导致检测结果全错。
 
 import { MODEL_INPUT, letterboxForFrame } from './postprocess'
+
 import type { BoardGridRect, Letterbox } from './types'
 
 /** 裁剪区域（原始帧像素） */
@@ -38,6 +39,66 @@ export function cropFromGrid(
   const cy1 = Math.min(frameH, y1 + my)
   if (cx1 - cx0 < 64 || cy1 - cy0 < 64) return null
   return { x0: cx0, y0: cy0, w: cx1 - cx0, h: cy1 - cy0 }
+}
+
+/**
+ * 棋子落在 640 输入里的目标尺度。模型训练分布约 25–37px：
+ * 实测 <25px 检不到（1080p 整帧棋盘 400px 时仅 15.9px，错 13 格），
+ * >44px 开始"同类多吐框"（黑车被判成卒、象/马/炮互相串类）。
+ */
+export const TARGET_PIECE_PX = 30
+/** 整帧尺度已落入训练分布的下界；达到它就不必裁剪 */
+export const PIECE_SCALE_MIN = 25
+
+/**
+ * 按**目标棋子尺度**推导裁剪区域。
+ *
+ * 动机（实测，用真实 JJ 截图在 1080p 与 240×445 两种捕获下扫描）：
+ * 模型对棋子的可辨识尺度有窗口——棋子落在 640 输入里 25–37px 时 0 错格，
+ * <25px 检不到，>44px 则出现"同类多吐框"（黑车→卒、象/马/炮串类）。
+ * 旧实现用"棋盘外扩 20%"裁剪，裁剪区域随棋盘大小变，棋子尺度也跟着漂：
+ * 模拟器 240×445 整帧本是 37px（正好），一裁剪变成 51–67px（分布外）→ 多吐误检。
+ *
+ * 现在的取法：
+ * - 整帧尺度已 ≥ PIECE_SCALE_MIN → 返回 null，用整帧（别为了裁而裁）
+ * - 否则取方形裁剪，边长使棋子缩放到 TARGET_PIECE_PX，且不小于棋盘本身
+ *
+ * @param pieceSize 当前帧检出的棋子中位边长（原始帧像素）
+ * @returns null = 用整帧；否则为裁剪区域
+ */
+export function cropForPieceScale(
+  grid: BoardGridRect | null,
+  pieceSize: number,
+  frameW: number,
+  frameH: number,
+): CropRect | null {
+  if (!grid || pieceSize <= 0) return null
+  const fullScale = pieceSize * Math.min(MODEL_INPUT / frameW, MODEL_INPUT / frameH)
+  if (fullScale >= PIECE_SCALE_MIN) return null
+
+  const x0 = grid.nx0 * frameW
+  const y0 = grid.ny0 * frameH
+  const x1 = grid.nx1 * frameW
+  const y1 = grid.ny1 * frameH
+  const bw = x1 - x0
+  const bh = y1 - y0
+  if (bw <= 0 || bh <= 0) return null
+
+  // 方形边长：使棋子缩放到目标尺度；同时不小于棋盘本身（外扩 20% 容纳小幅位移）
+  const side = Math.min(
+    frameW,
+    frameH,
+    Math.max(pieceSize * (MODEL_INPUT / TARGET_PIECE_PX), bw * 1.2, bh * 1.2),
+  )
+  if (side < 64) return null
+  const cx = (x0 + x1) / 2
+  const cy = (y0 + y1) / 2
+  return {
+    x0: Math.max(0, Math.min(frameW - side, cx - side / 2)),
+    y0: Math.max(0, Math.min(frameH - side, cy - side / 2)),
+    w: side,
+    h: side,
+  }
 }
 
 /**
